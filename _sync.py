@@ -1,0 +1,684 @@
+"""Shared sync helpers. Imported by the per-platform entry scripts."""
+from __future__ import annotations
+
+import fcntl
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+_SYNC_ROOT_ENV = os.environ.get("GIT_SYNC_ROOT")
+if not _SYNC_ROOT_ENV:
+    print(
+        "error: GIT_SYNC_ROOT is not set. Set it to the directory where synced "
+        "repos should live, e.g. `export GIT_SYNC_ROOT=$HOME/git/synced`.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+SYNC_ROOT = Path(_SYNC_ROOT_ENV).expanduser()
+PARALLEL = int(os.environ.get("GIT_SYNC_PARALLEL", "8"))
+
+# Exit code meaning "platform skipped — not a failure, just nothing to do."
+EXIT_SKIPPED = 2
+
+
+def _parse_skip_list(raw: str) -> list[str]:
+    """Parse GIT_SYNC_SKIP into a list of lowercased path prefixes."""
+    if not raw:
+        return []
+    return [
+        p.strip().strip("/").lower()
+        for p in raw.split(",")
+        if p.strip().strip("/")
+    ]
+
+
+SKIP_PATTERNS = _parse_skip_list(os.environ.get("GIT_SYNC_SKIP", ""))
+
+
+def matches_skip(repo_path: str) -> bool:
+    """True if repo_path matches any GIT_SYNC_SKIP pattern (case-insensitive prefix)."""
+    if not SKIP_PATTERNS:
+        return False
+    p = repo_path.strip("/").lower()
+    for pattern in SKIP_PATTERNS:
+        if p == pattern or p.startswith(pattern + "/"):
+            return True
+    return False
+
+
+# ---- Logging ----
+
+_TTY = sys.stderr.isatty()
+C_RED = "\033[31m" if _TTY else ""
+C_YEL = "\033[33m" if _TTY else ""
+C_GRN = "\033[32m" if _TTY else ""
+C_CYA = "\033[36m" if _TTY else ""
+C_MAG = "\033[35m" if _TTY else ""
+C_DIM = "\033[2m" if _TTY else ""
+C_BLD = "\033[1m" if _TTY else ""
+C_OFF = "\033[0m" if _TTY else ""
+
+_log_lock = threading.Lock()
+
+
+def _ts() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def log_info(msg: str) -> None:
+    with _log_lock:
+        print(f"{C_DIM}[{_ts()}]{C_OFF} {msg}", file=sys.stderr, flush=True)
+
+
+def log_ok(msg: str) -> None:
+    with _log_lock:
+        print(f"{C_GRN}[{_ts()}] ok {msg}{C_OFF}", file=sys.stderr, flush=True)
+
+
+def log_warn(msg: str) -> None:
+    with _log_lock:
+        print(f"{C_YEL}[{_ts()}] !  {msg}{C_OFF}", file=sys.stderr, flush=True)
+
+
+def log_error(msg: str) -> None:
+    with _log_lock:
+        print(f"{C_RED}[{_ts()}] x  {msg}{C_OFF}", file=sys.stderr, flush=True)
+
+
+# ---- Outcome model ----
+
+class Status(str, Enum):
+    CLONED = "cloned"
+    UPDATED = "updated"
+    UP_TO_DATE = "up-to-date"
+    EMPTY_REMOTE = "empty-remote"
+    DIRTY = "dirty"
+    DIVERGED = "diverged"
+    BRANCH_MISSING = "branch-missing"
+    STALE_ON_DISK = "stale-on-disk"
+    NON_GIT_DIR = "non-git-dir"
+    SKIPPED = "skipped"
+    ERROR = "error"
+
+
+@dataclass
+class Outcome:
+    rel: str
+    status: Status
+    url: str = ""
+    detail: str = ""
+    old_sha: str = ""
+    new_sha: str = ""
+    commits_ahead: int = 0
+
+
+class OutcomeCollector:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: list[Outcome] = []
+
+    def add(self, o: Outcome) -> None:
+        with self._lock:
+            self._items.append(o)
+
+    @property
+    def items(self) -> list[Outcome]:
+        with self._lock:
+            return list(self._items)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+
+@dataclass
+class Job:
+    ssh_url: str
+    dest: Path
+    branch: str
+
+
+# ---- Locking ----
+
+# Hold lock fds at module scope so Python doesn't GC them mid-run.
+_held_locks: list = []
+
+
+def acquire_platform_lock(platform: str) -> bool:
+    """Acquire an exclusive lock for this platform. Returns True if acquired,
+    False if another sync of the same platform is in progress. Bitbucket and
+    GitLab have separate locks, so they can run concurrently.
+
+    The lock file lives at <SYNC_ROOT>/.git-sync.<platform>.lock and is held
+    via fcntl.flock for the lifetime of this process. Released automatically
+    on process exit.
+    """
+    SYNC_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = SYNC_ROOT / f".git-sync.{platform}.lock"
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        return False
+    _held_locks.append(fd)
+    return True
+
+
+# ---- Subprocess plumbing ----
+
+_BRANCH_MISSING_RE = re.compile(r"Remote branch .* not found in upstream origin")
+
+
+def _git_env() -> dict:
+    """Env for git subprocesses. Forces C locale so error-message parsing is
+    stable, and disables interactive credential prompts."""
+    return {**os.environ, "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0"}
+
+
+def run_with_retry(
+    cmd: list[str],
+    *,
+    description: str,
+    attempts: int = 3,
+    backoff: float = 2.0,
+    timeout: int = 600,
+) -> tuple[bool, str]:
+    """Run cmd with retry/backoff. Returns (ok, combined_output)."""
+    delay = backoff
+    output = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                env=_git_env(),
+            )
+            output = result.stdout or ""
+            rc = result.returncode
+        except subprocess.TimeoutExpired as e:
+            # e.stdout can come back as bytes even when text=True (Python subprocess
+            # quirk when the timeout fires before the text decoder runs).
+            captured = e.stdout or ""
+            if isinstance(captured, bytes):
+                captured = captured.decode("utf-8", errors="replace")
+            output = captured + f"\n[timed out after {timeout}s]"
+            rc = 124
+        except FileNotFoundError as e:
+            return False, f"command not found: {e}"
+        if rc == 0:
+            return True, output
+        if attempt < attempts:
+            log_warn(f"{description}: attempt {attempt} failed; retrying in {delay:.0f}s")
+            time.sleep(delay)
+            delay *= 2
+    return False, output
+
+
+def _git(repo: Path, *args: str) -> tuple[int, str]:
+    r = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_git_env(),
+    )
+    return r.returncode, (r.stdout or "")
+
+
+def _has_remote_ref(repo: Path, branch: str) -> bool:
+    rc, _ = _git(repo, "rev-parse", "--verify", f"refs/remotes/origin/{branch}")
+    return rc == 0
+
+
+def _has_any_ref(repo: Path) -> bool:
+    rc, _ = _git(repo, "show-ref")
+    return rc == 0
+
+
+def _is_dirty(repo: Path) -> bool:
+    rc, out = _git(repo, "status", "--porcelain")
+    return rc == 0 and bool(out.strip())
+
+
+def _head_sha(repo: Path) -> str:
+    rc, out = _git(repo, "rev-parse", "HEAD")
+    return out.strip() if rc == 0 else ""
+
+
+def _current_branch(repo: Path) -> str:
+    rc, out = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+    return out.strip() if rc == 0 else ""
+
+
+def _count_commits_between(repo: Path, base: str, tip: str) -> int:
+    rc, out = _git(repo, "rev-list", "--count", f"{base}..{tip}")
+    if rc != 0:
+        return 0
+    try:
+        return int(out.strip())
+    except ValueError:
+        return 0
+
+
+def _tail(s: str, n: int = 20) -> str:
+    lines = s.splitlines()
+    return "\n".join(lines[-n:])
+
+
+def _safe_under_root(dest: Path) -> bool:
+    try:
+        dest.resolve().relative_to(SYNC_ROOT.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _rel(dest: Path) -> str:
+    """Path relative to SYNC_ROOT, or the absolute path if outside."""
+    try:
+        return str(dest.relative_to(SYNC_ROOT))
+    except ValueError:
+        return str(dest)
+
+
+# ---- Per-repo clone/update ----
+
+def clone_or_update(
+    *,
+    ssh_url: str,
+    dest: Path,
+    branch: str,
+    outcomes: OutcomeCollector,
+) -> None:
+    rel = _rel(dest)
+
+    if (dest / ".git").is_dir():
+        old_sha = _head_sha(dest)
+
+        # If the local clone has no refs yet, the remote was empty last time.
+        # Re-fetching will fail again with empty output; don't spam retry warnings.
+        was_empty = not _has_any_ref(dest)
+        ok, out = run_with_retry(
+            ["git", "-C", str(dest), "fetch", "--depth", "100", "--prune", "origin"],
+            description=f"{rel} fetch",
+            attempts=1 if was_empty else 3,
+        )
+        if not ok:
+            # `git fetch` returns nonzero with empty output when the remote has no refs
+            # at all (a freshly-created, never-pushed-to repo). Treat as in-sync.
+            if not out.strip() and not _has_any_ref(dest):
+                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+                return
+            outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out)))
+            return
+
+        # Fetch succeeded. Distinguish "remote totally empty" from
+        # "remote has refs but not the one we expected."
+        if not _has_remote_ref(dest, branch):
+            if _has_any_ref(dest):
+                outcomes.add(Outcome(
+                    rel, Status.BRANCH_MISSING, url=ssh_url,
+                    detail=f"remote has no '{branch}'",
+                ))
+            else:
+                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+            return
+
+        if _is_dirty(dest):
+            outcomes.add(Outcome(rel, Status.DIRTY, url=ssh_url))
+            return
+
+        cur_branch = _current_branch(dest)
+        if cur_branch != branch:
+            # User has checked out a different branch locally — fetch updated origin/*
+            # but don't switch their HEAD. Treat as diverged for reporting purposes.
+            ahead = _count_commits_between(dest, f"origin/{branch}", "HEAD") if cur_branch else 0
+            outcomes.add(Outcome(
+                rel, Status.DIVERGED, url=ssh_url,
+                detail=f"local on '{cur_branch or 'detached HEAD'}', not '{branch}'",
+                commits_ahead=ahead,
+            ))
+            return
+
+        ff_ok, _ff_out = run_with_retry(
+            ["git", "-C", str(dest), "merge", "--ff-only", f"origin/{branch}"],
+            description=f"{rel} ff",
+            attempts=1,
+        )
+        if not ff_ok:
+            ahead = _count_commits_between(dest, f"origin/{branch}", "HEAD")
+            outcomes.add(Outcome(
+                rel, Status.DIVERGED, url=ssh_url,
+                detail=f"local '{branch}' has commits not on origin/{branch}",
+                commits_ahead=ahead,
+            ))
+            return
+
+        new_sha = _head_sha(dest)
+        if new_sha == old_sha:
+            outcomes.add(Outcome(rel, Status.UP_TO_DATE, url=ssh_url))
+        else:
+            n = _count_commits_between(dest, old_sha, new_sha)
+            outcomes.add(Outcome(
+                rel, Status.UPDATED, url=ssh_url,
+                old_sha=old_sha[:7], new_sha=new_sha[:7], commits_ahead=n,
+            ))
+        return
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    ok, out = run_with_retry(
+        ["git", "clone", "--depth", "100", "--branch", branch, ssh_url, str(dest)],
+        description=f"{rel} clone",
+    )
+    if ok:
+        outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url))
+        return
+
+    if _BRANCH_MISSING_RE.search(out):
+        if not _safe_under_root(dest):
+            outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail="dest outside SYNC_ROOT"))
+            return
+        if dest.exists():
+            shutil.rmtree(dest)
+        ok2, out2 = run_with_retry(
+            ["git", "clone", "--depth", "100", ssh_url, str(dest)],
+            description=f"{rel} clone (no branch)",
+        )
+        if ok2:
+            # Either the repo has a different default branch or it's empty.
+            if _has_any_ref(dest):
+                outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url, detail="default branch differs from API"))
+            else:
+                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+        else:
+            outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out2)))
+        return
+
+    outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out)))
+
+
+def run_jobs(jobs: list[Job], outcomes: OutcomeCollector) -> None:
+    with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+        future_to_job = {
+            pool.submit(
+                clone_or_update,
+                ssh_url=j.ssh_url, dest=j.dest, branch=j.branch, outcomes=outcomes,
+            ): j
+            for j in jobs
+        }
+        done = 0
+        total = len(future_to_job)
+        for fut in as_completed(future_to_job):
+            j = future_to_job[fut]
+            try:
+                fut.result()
+            except Exception as e:  # noqa: BLE001 — capture for reporting, don't kill the pool
+                rel = _rel(j.dest)
+                log_error(f"{rel}: worker crashed: {e!r}")
+                outcomes.add(Outcome(
+                    rel=rel, status=Status.ERROR, url=j.ssh_url,
+                    detail=f"worker crashed: {e!r}",
+                ))
+            done += 1
+            if done % 25 == 0 or done == total:
+                log_info(f"progress: {done}/{total}")
+
+
+# ---- Stale / non-git directory discovery ----
+
+def discover_extras(
+    platform_root: Path,
+    expected_dests: set[Path],
+) -> list[Outcome]:
+    """Single-pass walk of platform_root. Returns outcomes for:
+      - stale-on-disk: a git repo whose path isn't in expected_dests
+      - non-git-dir: a directory tree under platform_root with no .git anywhere
+
+    For non-git-dir, only the topmost offending directory is reported. Each
+    on-disk directory is visited exactly once.
+    """
+    if not platform_root.is_dir():
+        return []
+
+    expected_resolved = {p.resolve() for p in expected_dests}
+
+    def walk(dir_path: Path) -> tuple[bool, list[Outcome]]:
+        """Returns (has_repo_in_subtree, outcomes_to_emit).
+
+        If has_repo_in_subtree is False, the caller can choose to discard
+        the returned outcomes and emit a single non-git-dir for the parent
+        instead — that's how we get topmost-only reporting.
+        """
+        # A directory containing .git is a git repo. Don't descend.
+        if (dir_path / ".git").is_dir():
+            oc: list[Outcome] = []
+            if dir_path.resolve() not in expected_resolved:
+                oc.append(Outcome(_rel(dir_path), Status.STALE_ON_DISK))
+            return True, oc
+
+        try:
+            children = sorted(
+                p for p in dir_path.iterdir()
+                if p.is_dir() and not p.is_symlink() and p.name != ".git"
+            )
+        except OSError:
+            return False, []
+
+        has_repo = False
+        repo_branch_outcomes: list[Outcome] = []
+        non_git_subtree_outcomes: list[Outcome] = []
+        for child in children:
+            child_has_repo, child_oc = walk(child)
+            if child_has_repo:
+                has_repo = True
+                repo_branch_outcomes.extend(child_oc)
+            else:
+                non_git_subtree_outcomes.extend(child_oc)
+
+        if has_repo:
+            # We're a container. Emit outcomes from repo-containing branches
+            # AND from any non-git sibling subtrees (each already collapsed to
+            # its own topmost entry by the recursive call).
+            return True, repo_branch_outcomes + non_git_subtree_outcomes
+        # No repos anywhere in our subtree. Collapse to a single non-git-dir
+        # for this directory, discarding the descendants' entries.
+        return False, [Outcome(_rel(dir_path), Status.NON_GIT_DIR)]
+
+    try:
+        top_children = sorted(
+            p for p in platform_root.iterdir()
+            if p.is_dir() and not p.is_symlink() and p.name != ".git"
+        )
+    except OSError:
+        return []
+
+    results: list[Outcome] = []
+    for child in top_children:
+        _, child_oc = walk(child)
+        results.extend(child_oc)
+    return results
+
+
+# ---- Run finalization ----
+
+def finish_run(
+    platform_root: Path,
+    jobs: list[Job],
+    skipped: list[Outcome],
+    outcomes: OutcomeCollector,
+) -> list[Outcome]:
+    """Combine sync outcomes, skipped repos, and stale/non-git findings.
+    Skipped repo destinations count as 'expected' so they aren't flagged as stale.
+    """
+    expected = {j.dest for j in jobs}
+    for o in skipped:
+        expected.add(SYNC_ROOT / o.rel)
+    extras = discover_extras(platform_root, expected)
+    return outcomes.items + skipped + extras
+
+
+# ---- Status presentation ----
+
+@dataclass(frozen=True)
+class _StatusMeta:
+    glyph: str
+    color: str
+    title: str  # Section header. Empty string = suppress from summary listing.
+    legend: str  # Description in the legend. Always shown if non-empty.
+
+
+_STATUS_META: dict[Status, _StatusMeta] = {
+    Status.CLONED: _StatusMeta(
+        "+", C_GRN, "Cloned",
+        "freshly cloned from remote",
+    ),
+    Status.UPDATED: _StatusMeta(
+        "↑", C_GRN, "Updated",
+        "local branch fast-forwarded to new remote tip",
+    ),
+    Status.UP_TO_DATE: _StatusMeta(
+        "=", C_DIM, "",
+        "",
+    ),
+    Status.EMPTY_REMOTE: _StatusMeta(
+        "∅", C_DIM, "",
+        "",
+    ),
+    Status.DIRTY: _StatusMeta(
+        "~", C_YEL, "Dirty — fetched but not merged",
+        "working tree had uncommitted changes; fetched but not merged",
+    ),
+    Status.DIVERGED: _StatusMeta(
+        "⤧", C_YEL, "Diverged — local has commits not on remote",
+        "local has commits not on remote, or on a different branch; fetched only",
+    ),
+    Status.BRANCH_MISSING: _StatusMeta(
+        "⚠", C_YEL, "Branch missing on remote",
+        "remote is non-empty but doesn't have the API's default branch — likely renamed or deleted upstream",
+    ),
+    Status.STALE_ON_DISK: _StatusMeta(
+        "?", C_MAG, "Stale on disk — not in remote listing",
+        "repo exists locally but not in remote listing — may have been deleted or renamed remotely",
+    ),
+    Status.NON_GIT_DIR: _StatusMeta(
+        "?", C_CYA, "Non-git directories under sync root",
+        "directory under sync root with no .git anywhere — not managed by this script",
+    ),
+    Status.SKIPPED: _StatusMeta(
+        "-", C_DIM, "Skipped — matched GIT_SYNC_SKIP",
+        "matched a GIT_SYNC_SKIP pattern; left untouched",
+    ),
+    Status.ERROR: _StatusMeta(
+        "x", C_RED, "Errors",
+        "network, auth, or other failure (re-run to retry)",
+    ),
+}
+
+# Order shown in the summary. Statuses with empty title are suppressed.
+_SUMMARY_ORDER: list[Status] = [
+    Status.CLONED,
+    Status.UPDATED,
+    Status.DIRTY,
+    Status.DIVERGED,
+    Status.BRANCH_MISSING,
+    Status.STALE_ON_DISK,
+    Status.NON_GIT_DIR,
+    Status.SKIPPED,
+    Status.ERROR,
+]
+
+
+def _format_outcome_line(o: Outcome) -> str:
+    meta = _STATUS_META[o.status]
+    line = f"  {meta.color}{meta.glyph}{C_OFF} {o.rel}"
+    if o.status == Status.UPDATED and o.old_sha and o.new_sha:
+        s = "s" if o.commits_ahead != 1 else ""
+        line += f"  {C_DIM}{o.old_sha} → {o.new_sha}  ({o.commits_ahead} commit{s}){C_OFF}"
+        return line
+
+    if o.status == Status.DIVERGED:
+        parts: list[str] = []
+        if o.detail:
+            parts.append(o.detail)
+        if o.commits_ahead:
+            s = "s" if o.commits_ahead != 1 else ""
+            parts.append(f"{o.commits_ahead} local commit{s}")
+        if parts:
+            line += f"  {C_DIM}{'; '.join(parts)}{C_OFF}"
+        return line
+
+    if o.detail:
+        line += f"  {C_DIM}{o.detail}{C_OFF}"
+    return line
+
+
+def print_outcome_summary(outcomes: list[Outcome]) -> bool:
+    """Print the summary table. Returns True if there were error outcomes."""
+    out = sys.stderr
+    grouped: dict[Status, list[Outcome]] = {s: [] for s in Status}
+    for o in outcomes:
+        grouped[o.status].append(o)
+
+    total = len(outcomes)
+
+    print(file=out)
+    print(f"{C_BLD}========== Sync summary =========={C_OFF}", file=out)
+    print(file=out)
+
+    any_printed = False
+    for status in _SUMMARY_ORDER:
+        items = grouped[status]
+        if not items:
+            continue
+        meta = _STATUS_META[status]
+        if not meta.title:
+            continue  # suppressed from summary listing
+        any_printed = True
+        print(f"{C_BLD}{meta.title} ({len(items)}){C_OFF}", file=out)
+        for o in sorted(items, key=lambda x: x.rel):
+            print(_format_outcome_line(o), file=out)
+        print(file=out)
+
+    if not any_printed:
+        print(f"  {C_GRN}Nothing to report — everything in sync.{C_OFF}", file=out)
+        print(file=out)
+
+    # Footnote about suppressed entries (statuses with empty title).
+    suppressed_counts: list[str] = []
+    for status in Status:
+        if _STATUS_META[status].title or not grouped[status]:
+            continue
+        suppressed_counts.append(f"{len(grouped[status])} {status.value}")
+    if suppressed_counts:
+        print(f"{C_DIM}({' and '.join(suppressed_counts)} not listed — {total} total){C_OFF}", file=out)
+        print(file=out)
+
+    # Legend
+    print(f"{C_BLD}Legend{C_OFF}", file=out)
+    for status in _SUMMARY_ORDER:
+        meta = _STATUS_META[status]
+        if not meta.legend:
+            continue
+        print(f"  {meta.color}{meta.glyph}{C_OFF}  {C_BLD}{status.value:<14}{C_OFF} {meta.legend}", file=out)
+    print(file=out)
+    print(f"{C_BLD}=================================={C_OFF}", file=out)
+
+    return bool(grouped[Status.ERROR])

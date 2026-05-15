@@ -1,0 +1,36 @@
+# git-sync configuration. Copy this file to .envrc and edit the values to match
+# your setup. If you use direnv, `direnv allow` once in this directory and the
+# vars below will load automatically whenever you cd in.
+#
+# If you don't use direnv, you can `source` this file from your shell, or set
+# these vars in your shell rc (~/.zshrc, ~/.bashrc, ~/.config/fish/config.fish).
+
+# REQUIRED. Where mirrored repos will be cloned to. Two subdirectories are
+# created under here: Bitbucket/ and Gitlab/.
+export GIT_SYNC_ROOT="$HOME/git/synced"
+
+# REQUIRED for Bitbucket. The workspace slug — the part after bitbucket.org/
+# in your repo URLs. Omit to skip Bitbucket entirely.
+export GIT_SYNC_BITBUCKET_WORKSPACE=your-workspace-slug
+
+# REQUIRED for GitLab. The hostname of your GitLab instance. Omit to skip
+# GitLab entirely. Must match a hostname you've authenticated `glab` against
+# (run `glab auth login --hostname <host>` once).
+export GITLAB_HOST=gitlab.example.com
+
+# OPTIONAL. Comma-separated list of repos or path prefixes to skip.
+# Case-insensitive prefix match. Trailing slashes are optional.
+# Examples:
+#   GIT_SYNC_SKIP="legacy-monorepo"                 # skips one repo by name
+#   GIT_SYNC_SKIP="some-group/archive/"             # skips a whole subtree
+#   GIT_SYNC_SKIP="legacy, some-group/archive"      # multiple entries
+# export GIT_SYNC_SKIP=""
+
+# OPTIONAL. Bitbucket credentials via env vars instead of ~/.netrc. The app
+# password needs the read:repository:bitbucket scope. Create one at:
+# https://bitbucket.org/account/settings/app-passwords/
+# export GIT_SYNC_BITBUCKET_USER=your-bitbucket-username
+# export GIT_SYNC_BITBUCKET_APP_PASSWORD=your-app-password
+
+# OPTIONAL. Number of repos to sync in parallel. Default: 8.
+# export GIT_SYNC_PARALLEL=8
