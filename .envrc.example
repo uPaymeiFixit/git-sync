@@ -34,3 +34,11 @@ export GITLAB_HOST=gitlab.example.com
 
 # OPTIONAL. Number of repos to sync in parallel. Default: 8.
 # export GIT_SYNC_PARALLEL=8
+
+# OPTIONAL. Clone/fetch depth — how many commits of history to pull per branch.
+# Lower values save disk and bandwidth; higher values give more history. Set to
+# 0 for full history (no --depth flag). Default: 100.
+# Note: switching from a shallow value to 0 won't retroactively unshallow
+# already-cloned repos. To unshallow an existing repo run:
+#   git -C <repo> fetch --unshallow
+# export GIT_SYNC_DEPTH=100

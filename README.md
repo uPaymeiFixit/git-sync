@@ -34,6 +34,7 @@ All configuration is via environment variables. See [.envrc.example](.envrc.exam
 | `GIT_SYNC_SKIP` | Optional |
 | `GIT_SYNC_BITBUCKET_USER`, `GIT_SYNC_BITBUCKET_APP_PASSWORD` | Optional (alternative to `~/.netrc`) |
 | `GIT_SYNC_PARALLEL` | Optional (default 8) |
+| `GIT_SYNC_DEPTH` | Optional (default 100; `0` for full history) |
 
 Quickest setup: `cp .envrc.example .envrc`, edit values, then either `direnv allow` or `source .envrc`.
 

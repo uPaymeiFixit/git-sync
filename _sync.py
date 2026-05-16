@@ -25,6 +25,20 @@ if not _SYNC_ROOT_ENV:
 SYNC_ROOT = Path(_SYNC_ROOT_ENV).expanduser()
 PARALLEL = int(os.environ.get("GIT_SYNC_PARALLEL", "8"))
 
+# Clone/fetch depth. 0 means no --depth flag (full history).
+DEPTH = int(os.environ.get("GIT_SYNC_DEPTH", "100"))
+if DEPTH < 0:
+    print(
+        f"error: GIT_SYNC_DEPTH must be >= 0 (got {DEPTH}). Use 0 for full history.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _depth_args() -> list[str]:
+    """Return ['--depth', str(N)] or [] when full history is requested."""
+    return ["--depth", str(DEPTH)] if DEPTH > 0 else []
+
 # Exit code meaning "platform skipped — not a failure, just nothing to do."
 EXIT_SKIPPED = 2
 
@@ -317,7 +331,7 @@ def clone_or_update(
         # Re-fetching will fail again with empty output; don't spam retry warnings.
         was_empty = not _has_any_ref(dest)
         ok, out = run_with_retry(
-            ["git", "-C", str(dest), "fetch", "--depth", "100", "--prune", "origin"],
+            ["git", "-C", str(dest), "fetch", *_depth_args(), "--prune", "origin"],
             description=f"{rel} fetch",
             attempts=1 if was_empty else 3,
         )
@@ -385,7 +399,7 @@ def clone_or_update(
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     ok, out = run_with_retry(
-        ["git", "clone", "--depth", "100", "--branch", branch, ssh_url, str(dest)],
+        ["git", "clone", *_depth_args(), "--branch", branch, ssh_url, str(dest)],
         description=f"{rel} clone",
     )
     if ok:
@@ -399,7 +413,7 @@ def clone_or_update(
         if dest.exists():
             shutil.rmtree(dest)
         ok2, out2 = run_with_retry(
-            ["git", "clone", "--depth", "100", ssh_url, str(dest)],
+            ["git", "clone", *_depth_args(), ssh_url, str(dest)],
             description=f"{rel} clone (no branch)",
         )
         if ok2:
