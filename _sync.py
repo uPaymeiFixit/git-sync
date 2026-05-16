@@ -381,6 +381,12 @@ def clone_or_update(
             if not out.strip() and not _has_any_ref(dest):
                 outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
                 return
+            # Remote has no usable HEAD — typically an empty repo whose API
+            # metadata still claims a default branch. Same classification as
+            # the clone path.
+            if _NO_MATCHING_HEAD_RE.search(out):
+                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+                return
             outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out)))
             return
 
