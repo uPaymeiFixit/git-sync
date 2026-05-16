@@ -36,6 +36,7 @@ All configuration is via environment variables. See [.envrc.example](.envrc.exam
 | `GIT_SYNC_PARALLEL` | Optional (default 8) |
 | `GIT_SYNC_DEPTH` | Optional (default 100; `0` for full history) |
 | `GIT_SYNC_ALL_BRANCHES` | Optional (default off; `1` to clone all branches per repo) |
+| `GIT_SYNC_TIMEOUT` | Optional (default 1800; max seconds per clone/fetch) |
 
 Quickest setup: `cp .envrc.example .envrc`, edit values, then either `direnv allow` or `source .envrc`.
 

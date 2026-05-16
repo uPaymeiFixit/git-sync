@@ -35,6 +35,12 @@ export GITLAB_HOST=gitlab.example.com
 # OPTIONAL. Number of repos to sync in parallel. Default: 8.
 # export GIT_SYNC_PARALLEL=8
 
+# OPTIONAL. Max seconds for any single git clone or fetch. Default 1800
+# (30 minutes), which fits first-time clones of multi-GB repos with server-
+# side pack-building bottlenecks. Bump higher if you have repos that
+# legitimately need more time.
+# export GIT_SYNC_TIMEOUT=1800
+
 # OPTIONAL. Clone/fetch depth — how many commits of history to pull per branch.
 # Lower values save disk and bandwidth; higher values give more history. Set to
 # 0 for full history (no --depth flag). Default: 100.
