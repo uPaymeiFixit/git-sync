@@ -276,7 +276,10 @@ def run_with_retry(
             if isinstance(captured, bytes):
                 captured = captured.decode("utf-8", errors="replace")
             output = captured + f"\n[timed out after {timeout}s]"
-            rc = 124
+            # A timeout means "operation just takes longer than `timeout` seconds";
+            # retrying won't help, only burns time. Surface the timeout error
+            # immediately instead of wasting two more attempts.
+            return False, output
         except FileNotFoundError as e:
             return False, f"command not found: {e}"
         if rc == 0:
