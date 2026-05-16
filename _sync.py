@@ -239,11 +239,22 @@ def run_with_retry(
     attempts: int = 3,
     backoff: float = 2.0,
     timeout: int = 600,
+    on_retry: "Callable[[], None] | None" = None,
 ) -> tuple[bool, str]:
-    """Run cmd with retry/backoff. Returns (ok, combined_output)."""
+    """Run cmd with retry/backoff. Returns (ok, combined_output).
+
+    If on_retry is provided, it is called before every attempt after the first.
+    Useful for cleaning up partial state (e.g. a half-created clone destination)
+    so subsequent attempts don't fail on artifacts of the prior failure.
+    """
     delay = backoff
     output = ""
     for attempt in range(1, attempts + 1):
+        if attempt > 1 and on_retry is not None:
+            try:
+                on_retry()
+            except Exception as e:  # noqa: BLE001 — cleanup is best-effort
+                log_warn(f"{description}: on_retry cleanup failed: {e!r}")
         try:
             result = subprocess.run(
                 cmd,
@@ -444,10 +455,27 @@ def clone_or_update(
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # If the clone fails partway through, it leaves dest half-populated. The
+    # next attempt would then fail immediately with "destination already exists
+    # and is not an empty directory", masking the real error. We clean up
+    # between attempts — but only when dest didn't exist before our first
+    # attempt (otherwise the leftover content might be user work).
+    dest_existed_before_clone = dest.exists()
+
+    def _cleanup_partial_clone() -> None:
+        if dest_existed_before_clone:
+            return  # don't touch anything that was already there
+        if not _safe_under_root(dest):
+            return
+        if dest.exists():
+            shutil.rmtree(dest)
+
     ok, out = run_with_retry(
         ["git", "clone", *_depth_args(), *_branch_scope_args(),
          "--branch", branch, ssh_url, str(dest)],
         description=f"{rel} clone",
+        on_retry=_cleanup_partial_clone,
     )
     if ok:
         outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url))
@@ -468,6 +496,7 @@ def clone_or_update(
         ok2, out2 = run_with_retry(
             ["git", "clone", *_depth_args(), *_branch_scope_args(), ssh_url, str(dest)],
             description=f"{rel} clone (no branch)",
+            on_retry=_cleanup_partial_clone,
         )
         if ok2:
             # Either the repo has a different default branch or it's empty.
