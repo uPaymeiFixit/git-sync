@@ -240,10 +240,24 @@ def _clean_stale_locks(repo: Path) -> list[str]:
     return removed
 
 
+# Bound SSH connection hangs. ConnectTimeout caps the initial TCP/SSH
+# handshake; ServerAliveInterval + ServerAliveCountMax detect a connection
+# that goes silent mid-transfer. ~45s ceiling on a hung remote, vs. the
+# previous behavior of hanging up to the full run_with_retry timeout (600s).
+_GIT_SSH_COMMAND = (
+    "ssh -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+)
+
+
 def _git_env() -> dict:
     """Env for git subprocesses. Forces C locale so error-message parsing is
-    stable, and disables interactive credential prompts."""
-    return {**os.environ, "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0"}
+    stable, disables interactive credential prompts, and bounds SSH hang time."""
+    return {
+        **os.environ,
+        "LC_ALL": "C",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": _GIT_SSH_COMMAND,
+    }
 
 
 def run_with_retry(
