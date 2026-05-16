@@ -202,6 +202,10 @@ def acquire_platform_lock(platform: str) -> bool:
 # ---- Subprocess plumbing ----
 
 _BRANCH_MISSING_RE = re.compile(r"Remote branch .* not found in upstream origin")
+# Emitted by `git clone` when the remote responds but has no usable HEAD —
+# almost always a truly empty repo whose API metadata still reports a default
+# branch. Not a real failure, classify as empty-remote.
+_NO_MATCHING_HEAD_RE = re.compile(r"no matching remote head", re.IGNORECASE)
 
 # Git lock files left behind by killed processes. We remove these before fetch,
 # but only when they're older than _STALE_LOCK_AGE_SECS — a real `git commit`
@@ -457,6 +461,12 @@ def clone_or_update(
         outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url))
         return
 
+    # Remote responded but has no usable HEAD — typically an empty repo whose
+    # API metadata still claims a default branch. Not a real failure.
+    if _NO_MATCHING_HEAD_RE.search(out):
+        outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+        return
+
     if _BRANCH_MISSING_RE.search(out):
         if not _safe_under_root(dest):
             outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail="dest outside SYNC_ROOT"))
@@ -473,6 +483,8 @@ def clone_or_update(
                 outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url, detail="default branch differs from API"))
             else:
                 outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+        elif _NO_MATCHING_HEAD_RE.search(out2):
+            outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
         else:
             outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out2)))
         return
