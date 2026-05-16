@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sync import (  # noqa: E402
     EXIT_SKIPPED, PARALLEL, SYNC_ROOT,
     Job, Outcome, OutcomeCollector, Status,
-    _rel, acquire_platform_lock, finish_run,
+    _rel, finish_run,
     log_error, log_info, log_ok, log_warn,
     matches_skip, print_outcome_summary, run_jobs,
 )
@@ -134,13 +134,6 @@ def main() -> int:
         return EXIT_SKIPPED
 
     platform_root = DEST_ROOT / WORKSPACE
-
-    if not acquire_platform_lock("bitbucket"):
-        log_error(
-            "Another Bitbucket sync is already running (lock file under "
-            f"{SYNC_ROOT}/.git-sync.bitbucket.lock is held). Exiting."
-        )
-        return 1
 
     log_info(f"Pre-flight: Bitbucket API auth (repo read on '{WORKSPACE}')")
     try:

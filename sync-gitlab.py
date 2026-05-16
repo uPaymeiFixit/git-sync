@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sync import (  # noqa: E402
     EXIT_SKIPPED, PARALLEL, SYNC_ROOT,
     Job, Outcome, OutcomeCollector, Status,
-    _rel, acquire_platform_lock, finish_run,
+    _rel, finish_run,
     log_error, log_info, log_ok, log_warn,
     matches_skip, print_outcome_summary, run_jobs,
 )
@@ -121,13 +121,6 @@ def main() -> int:
     except CredsNotConfigured as e:
         log_info(f"Skipping GitLab — {e}")
         return EXIT_SKIPPED
-
-    if not acquire_platform_lock("gitlab"):
-        log_error(
-            "Another GitLab sync is already running (lock file under "
-            f"{SYNC_ROOT}/.git-sync.gitlab.lock is held). Exiting."
-        )
-        return 1
 
     try:
         glab_api("version", paginate=False)

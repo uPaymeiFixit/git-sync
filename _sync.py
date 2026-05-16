@@ -1,7 +1,6 @@
 """Shared sync helpers. Imported by the per-platform entry scripts."""
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import shutil
@@ -170,33 +169,6 @@ class Job:
     ssh_url: str
     dest: Path
     branch: str
-
-
-# ---- Locking ----
-
-# Hold lock fds at module scope so Python doesn't GC them mid-run.
-_held_locks: list = []
-
-
-def acquire_platform_lock(platform: str) -> bool:
-    """Acquire an exclusive lock for this platform. Returns True if acquired,
-    False if another sync of the same platform is in progress. Bitbucket and
-    GitLab have separate locks, so they can run concurrently.
-
-    The lock file lives at <SYNC_ROOT>/.git-sync.<platform>.lock and is held
-    via fcntl.flock for the lifetime of this process. Released automatically
-    on process exit.
-    """
-    SYNC_ROOT.mkdir(parents=True, exist_ok=True)
-    lock_path = SYNC_ROOT / f".git-sync.{platform}.lock"
-    fd = open(lock_path, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fd.close()
-        return False
-    _held_locks.append(fd)
-    return True
 
 
 # ---- Subprocess plumbing ----
