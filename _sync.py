@@ -39,6 +39,18 @@ def _depth_args() -> list[str]:
     """Return ['--depth', str(N)] or [] when full history is requested."""
     return ["--depth", str(DEPTH)] if DEPTH > 0 else []
 
+
+# When set, clone all branches; otherwise (default) clone only the default branch.
+# This is explicit on both sides because git has surprising defaults: --depth implies
+# --single-branch unless you pass --no-single-branch, but a depthless clone is
+# all-branches by default. We force the behavior either way so it's predictable.
+ALL_BRANCHES = os.environ.get("GIT_SYNC_ALL_BRANCHES", "0").lower() in ("1", "true", "yes")
+
+
+def _branch_scope_args() -> list[str]:
+    """Force single-branch or all-branches behavior regardless of --depth implications."""
+    return ["--no-single-branch"] if ALL_BRANCHES else ["--single-branch"]
+
 # Exit code meaning "platform skipped — not a failure, just nothing to do."
 EXIT_SKIPPED = 2
 
@@ -399,7 +411,8 @@ def clone_or_update(
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     ok, out = run_with_retry(
-        ["git", "clone", *_depth_args(), "--branch", branch, ssh_url, str(dest)],
+        ["git", "clone", *_depth_args(), *_branch_scope_args(),
+         "--branch", branch, ssh_url, str(dest)],
         description=f"{rel} clone",
     )
     if ok:
@@ -413,7 +426,7 @@ def clone_or_update(
         if dest.exists():
             shutil.rmtree(dest)
         ok2, out2 = run_with_retry(
-            ["git", "clone", *_depth_args(), ssh_url, str(dest)],
+            ["git", "clone", *_depth_args(), *_branch_scope_args(), ssh_url, str(dest)],
             description=f"{rel} clone (no branch)",
         )
         if ok2:
