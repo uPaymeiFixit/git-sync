@@ -203,6 +203,38 @@ def acquire_platform_lock(platform: str) -> bool:
 
 _BRANCH_MISSING_RE = re.compile(r"Remote branch .* not found in upstream origin")
 
+# Git lock files left behind by killed processes. We remove these before fetch,
+# but only when they're older than _STALE_LOCK_AGE_SECS — a real `git commit`
+# running concurrently in the user's editor produces an index.lock that
+# completes in well under that, so the age check protects active work.
+_STALE_GIT_LOCKS = ("shallow.lock", "index.lock", "packed-refs.lock")
+_STALE_LOCK_AGE_SECS = 30
+
+
+def _clean_stale_locks(repo: Path) -> list[str]:
+    """Remove .git/*.lock files older than _STALE_LOCK_AGE_SECS. Returns the
+    names of files removed. Skips locks that are too young because they might
+    belong to a live git process (e.g. a commit the user is in the middle of)."""
+    git_dir = repo / ".git"
+    if not git_dir.is_dir():
+        return []
+    removed: list[str] = []
+    now = time.time()
+    for name in _STALE_GIT_LOCKS:
+        lock = git_dir / name
+        try:
+            mtime = lock.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if now - mtime < _STALE_LOCK_AGE_SECS:
+            continue
+        try:
+            lock.unlink()
+            removed.append(name)
+        except OSError:
+            pass
+    return removed
+
 
 def _git_env() -> dict:
     """Env for git subprocesses. Forces C locale so error-message parsing is
@@ -337,6 +369,12 @@ def clone_or_update(
     rel = _rel(dest)
 
     if (dest / ".git").is_dir():
+        # Remove old lock files left behind by killed git processes. Age-gated
+        # so we don't clobber an active commit/fetch happening in another window.
+        removed = _clean_stale_locks(dest)
+        if removed:
+            log_warn(f"{rel}: removed stale lock file(s): {', '.join(removed)}")
+
         old_sha = _head_sha(dest)
 
         # If the local clone has no refs yet, the remote was empty last time.
