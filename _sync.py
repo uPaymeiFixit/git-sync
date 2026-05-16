@@ -24,6 +24,17 @@ if not _SYNC_ROOT_ENV:
 SYNC_ROOT = Path(_SYNC_ROOT_ENV).expanduser()
 PARALLEL = int(os.environ.get("GIT_SYNC_PARALLEL", "8"))
 
+# Max seconds for any single git subprocess (clone or fetch). Large legacy
+# repos can take many minutes on a first clone; the default needs enough
+# headroom for those. Increase via env var if you have unusually large repos.
+TIMEOUT = int(os.environ.get("GIT_SYNC_TIMEOUT", "1800"))
+if TIMEOUT <= 0:
+    print(
+        f"error: GIT_SYNC_TIMEOUT must be > 0 (got {TIMEOUT}).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 # Clone/fetch depth. 0 means no --depth flag (full history).
 DEPTH = int(os.environ.get("GIT_SYNC_DEPTH", "100"))
 if DEPTH < 0:
@@ -238,7 +249,7 @@ def run_with_retry(
     description: str,
     attempts: int = 3,
     backoff: float = 2.0,
-    timeout: int = 600,
+    timeout: "int | None" = None,
     on_retry: "Callable[[], None] | None" = None,
 ) -> tuple[bool, str]:
     """Run cmd with retry/backoff. Returns (ok, combined_output).
@@ -247,6 +258,8 @@ def run_with_retry(
     Useful for cleaning up partial state (e.g. a half-created clone destination)
     so subsequent attempts don't fail on artifacts of the prior failure.
     """
+    if timeout is None:
+        timeout = TIMEOUT
     delay = backoff
     output = ""
     for attempt in range(1, attempts + 1):
