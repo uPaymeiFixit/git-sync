@@ -50,17 +50,6 @@ def _depth_args() -> list[str]:
     return ["--depth", str(DEPTH)] if DEPTH > 0 else []
 
 
-# When set, clone all branches; otherwise (default) clone only the default branch.
-# This is explicit on both sides because git has surprising defaults: --depth implies
-# --single-branch unless you pass --no-single-branch, but a depthless clone is
-# all-branches by default. We force the behavior either way so it's predictable.
-ALL_BRANCHES = os.environ.get("GIT_SYNC_ALL_BRANCHES", "0").lower() in ("1", "true", "yes")
-
-
-def _branch_scope_args() -> list[str]:
-    """Force single-branch or all-branches behavior regardless of --depth implications."""
-    return ["--no-single-branch"] if ALL_BRANCHES else ["--single-branch"]
-
 # Exit code meaning "platform skipped — not a failure, just nothing to do."
 EXIT_SKIPPED = 2
 
@@ -488,7 +477,11 @@ def clone_or_update(
             shutil.rmtree(dest)
 
     ok, out = run_with_retry(
-        ["git", "clone", *_depth_args(), *_branch_scope_args(),
+        # --no-single-branch overrides --depth's implicit --single-branch so
+        # every remote branch ref ends up in refs/remotes/origin/*. GUIs and
+        # `git checkout` can then discover and switch to any branch a teammate
+        # publishes, instead of being locked to the default branch forever.
+        ["git", "clone", *_depth_args(), "--no-single-branch",
          "--branch", branch, ssh_url, str(dest)],
         description=f"{rel} clone",
         on_retry=_cleanup_partial_clone,
@@ -510,7 +503,7 @@ def clone_or_update(
         if dest.exists():
             shutil.rmtree(dest)
         ok2, out2 = run_with_retry(
-            ["git", "clone", *_depth_args(), *_branch_scope_args(), ssh_url, str(dest)],
+            ["git", "clone", *_depth_args(), "--no-single-branch", ssh_url, str(dest)],
             description=f"{rel} clone (no branch)",
             on_retry=_cleanup_partial_clone,
         )

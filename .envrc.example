@@ -59,11 +59,3 @@ export GIT_SYNC_GITHUB_ORG=your-github-org
 #   git -C <repo> fetch --unshallow
 # export GIT_SYNC_DEPTH=100
 
-# OPTIONAL. Clone all branches instead of just the default branch. Off by
-# default to keep clones small — repos with many stale branches can be much
-# larger with this on (e.g. a repo with 1000+ branches can double in size).
-# Note: switching this on won't retroactively fetch all branches for repos
-# already cloned with the default. To convert an existing repo:
-#   git -C <repo> config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
-#   git -C <repo> fetch --prune origin
-# export GIT_SYNC_ALL_BRANCHES=1
