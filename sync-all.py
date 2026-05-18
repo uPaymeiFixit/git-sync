@@ -9,7 +9,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from _sync import EXIT_SKIPPED  # noqa: E402
 
-SCRIPTS = [HERE / "sync-gitlab.py", HERE / "sync-bitbucket.py"]
+SCRIPTS = [
+    HERE / "sync-gitlab.py",
+    HERE / "sync-bitbucket.py",
+    HERE / "sync-github.py",
+]
 
 
 def main() -> int:
