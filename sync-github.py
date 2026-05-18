@@ -154,7 +154,7 @@ def main() -> int:
         )
         return EXIT_SKIPPED
 
-    platform_root = DEST_ROOT / ORG
+    platform_root = DEST_ROOT
 
     log_info(f"Pre-flight: GitHub API auth (org read on '{ORG}')")
     try:

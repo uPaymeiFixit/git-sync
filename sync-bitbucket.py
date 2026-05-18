@@ -133,7 +133,7 @@ def main() -> int:
         )
         return EXIT_SKIPPED
 
-    platform_root = DEST_ROOT / WORKSPACE
+    platform_root = DEST_ROOT
 
     log_info(f"Pre-flight: Bitbucket API auth (repo read on '{WORKSPACE}')")
     try:
