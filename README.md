@@ -2,7 +2,7 @@
 
 Sync every repo you have access to across multiple Git hosts to local disk. Idempotent — re-run anytime.
 
-**Currently supports:** Bitbucket Cloud and self-hosted GitLab. Both are optional — configure either or both.
+**Currently supports:** Bitbucket Cloud, self-hosted GitLab, and GitHub.com. Each is optional — configure any subset.
 
 ## Setup
 
@@ -20,7 +20,17 @@ or env vars (see [.envrc.example](.envrc.example)). The app password needs the `
 
 **GitLab creds** — `glab auth login --hostname <your-gitlab-host>` (token needs `read_api` + `read_repository`).
 
-Either platform's creds may be omitted — that platform is skipped with a notice.
+**GitHub creds** — either `~/.netrc` (preferred):
+
+```
+machine api.github.com
+    login <github-username>
+    password <personal-access-token>
+```
+
+or env var `GIT_SYNC_GITHUB_TOKEN`. Classic PATs need the `repo` scope to access private repos; fine-grained PATs need `Contents: Read` + `Metadata: Read` on the target org. Create one at https://github.com/settings/tokens.
+
+Any platform's creds may be omitted — that platform is skipped with a notice.
 
 ## Configuration
 
@@ -31,8 +41,10 @@ All configuration is via environment variables. See [.envrc.example](.envrc.exam
 | `GIT_SYNC_ROOT` | Always |
 | `GIT_SYNC_BITBUCKET_WORKSPACE` | Only if syncing Bitbucket |
 | `GITLAB_HOST` | Only if syncing GitLab |
+| `GIT_SYNC_GITHUB_ORG` | Only if syncing GitHub |
 | `GIT_SYNC_SKIP` | Optional |
 | `GIT_SYNC_BITBUCKET_USER`, `GIT_SYNC_BITBUCKET_APP_PASSWORD` | Optional (alternative to `~/.netrc`) |
+| `GIT_SYNC_GITHUB_TOKEN` | Optional (alternative to `~/.netrc`) |
 | `GIT_SYNC_PARALLEL` | Optional (default 8) |
 | `GIT_SYNC_DEPTH` | Optional (default 100; `0` for full history) |
 | `GIT_SYNC_ALL_BRANCHES` | Optional (default off; `1` to clone all branches per repo) |
@@ -45,9 +57,10 @@ Quickest setup: `cp .envrc.example .envrc`, edit values, then either `direnv all
 From inside the repo:
 
 ```
-./sync-all.py        # both platforms
+./sync-all.py        # all configured platforms
 ./sync-bitbucket.py
 ./sync-gitlab.py
+./sync-github.py
 ```
 
 Or invoke by full path from anywhere — cwd doesn't matter, the scripts use `GIT_SYNC_ROOT` for paths.

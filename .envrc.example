@@ -18,6 +18,10 @@ export GIT_SYNC_BITBUCKET_WORKSPACE=your-workspace-slug
 # (run `glab auth login --hostname <host>` once).
 export GITLAB_HOST=gitlab.example.com
 
+# REQUIRED for GitHub. The organization name to mirror. Omit to skip
+# GitHub entirely.
+export GIT_SYNC_GITHUB_ORG=your-github-org
+
 # OPTIONAL. Comma-separated list of repos or path prefixes to skip.
 # Case-insensitive prefix match. Trailing slashes are optional.
 # Examples:
@@ -31,6 +35,12 @@ export GITLAB_HOST=gitlab.example.com
 # https://bitbucket.org/account/settings/app-passwords/
 # export GIT_SYNC_BITBUCKET_USER=your-bitbucket-username
 # export GIT_SYNC_BITBUCKET_APP_PASSWORD=your-app-password
+
+# OPTIONAL. GitHub credentials via env var instead of ~/.netrc. A classic
+# PAT needs the 'repo' scope to access private repos; a fine-grained PAT
+# needs 'Contents: Read' + 'Metadata: Read' on the target org.
+# Create one at: https://github.com/settings/tokens
+# export GIT_SYNC_GITHUB_TOKEN=your-personal-access-token
 
 # OPTIONAL. Number of repos to sync in parallel. Default: 8.
 # export GIT_SYNC_PARALLEL=8
