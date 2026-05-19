@@ -106,6 +106,10 @@ def _check_glab_available() -> None:
 
 
 def main() -> int:
+    if os.environ.get("GIT_SYNC_SKIP_GITLAB"):
+        log_info("Skipping GitLab — GIT_SYNC_SKIP_GITLAB is set.")
+        return EXIT_SKIPPED
+
     if not GITLAB_HOST:
         log_info(
             "Skipping GitLab — GITLAB_HOST is not set. "

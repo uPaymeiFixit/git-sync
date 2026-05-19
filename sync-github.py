@@ -127,6 +127,10 @@ def http_get_json(url: str, auth: str, *, attempts: int = 5, backoff: float = 2.
 
 
 def main() -> int:
+    if os.environ.get("GIT_SYNC_SKIP_GITHUB"):
+        log_info("Skipping GitHub — GIT_SYNC_SKIP_GITHUB is set.")
+        return EXIT_SKIPPED
+
     creds_present = _have_creds()
     org_set = bool(ORG)
 

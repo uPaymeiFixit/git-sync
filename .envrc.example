@@ -30,6 +30,13 @@ export GIT_SYNC_GITHUB_ORG=your-github-org
 #   GIT_SYNC_SKIP="legacy, some-group/archive"      # multiple entries
 # export GIT_SYNC_SKIP=""
 
+# OPTIONAL. Skip an entire platform even when credentials are configured.
+# Any non-empty value enables the skip — handy for toggling a platform off
+# without unsetting your auth vars. Each platform script honors its own var.
+# export GIT_SYNC_SKIP_BITBUCKET=1
+# export GIT_SYNC_SKIP_GITLAB=1
+# export GIT_SYNC_SKIP_GITHUB=1
+
 # OPTIONAL. Bitbucket credentials via env vars instead of ~/.netrc. The app
 # password needs the read:repository:bitbucket scope. Create one at:
 # https://bitbucket.org/account/settings/app-passwords/

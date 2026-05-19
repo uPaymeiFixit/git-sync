@@ -103,6 +103,10 @@ def http_get_json(url: str, auth_header: str, *, attempts: int = 5, backoff: flo
 
 
 def main() -> int:
+    if os.environ.get("GIT_SYNC_SKIP_BITBUCKET"):
+        log_info("Skipping Bitbucket — GIT_SYNC_SKIP_BITBUCKET is set.")
+        return EXIT_SKIPPED
+
     creds_present = _have_creds()
     workspace_set = bool(WORKSPACE)
 
