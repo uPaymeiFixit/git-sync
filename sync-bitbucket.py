@@ -212,7 +212,7 @@ def main() -> int:
 
     log_info(f"Found {len(jobs)} repos to sync. Using {PARALLEL} parallel workers...")
     outcomes = OutcomeCollector()
-    run_jobs(jobs, outcomes)
+    run_jobs(jobs, outcomes, description="Bitbucket sync")
 
     log_info(f"Scanning {platform_root} for stale and non-git directories...")
     all_outcomes = finish_run(platform_root, jobs, skipped, outcomes)

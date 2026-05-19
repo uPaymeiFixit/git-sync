@@ -1,9 +1,11 @@
 """Shared sync helpers. Imported by the per-platform entry scripts."""
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -93,29 +95,247 @@ C_OFF = "\033[0m" if _TTY else ""
 
 _log_lock = threading.Lock()
 
+# When a LiveDisplay is active it pins a status block at the bottom of the
+# terminal. Log writes need to scroll *above* that block, so they erase it
+# before writing and the next render redraws it. We track the line count
+# here so log_* and the display agree on what to erase.
+_display_lines = 0
+
 
 def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def _erase_display_locked() -> None:
+    """Erase the current live-display block. Caller must hold _log_lock."""
+    global _display_lines
+    if _display_lines > 0 and _TTY:
+        sys.stderr.write(f"\033[{_display_lines}A\033[J")
+        sys.stderr.flush()
+        _display_lines = 0
+
+
 def log_info(msg: str) -> None:
     with _log_lock:
+        _erase_display_locked()
         print(f"{C_DIM}[{_ts()}]{C_OFF} {msg}", file=sys.stderr, flush=True)
 
 
 def log_ok(msg: str) -> None:
     with _log_lock:
+        _erase_display_locked()
         print(f"{C_GRN}[{_ts()}] ok {msg}{C_OFF}", file=sys.stderr, flush=True)
 
 
 def log_warn(msg: str) -> None:
     with _log_lock:
+        _erase_display_locked()
         print(f"{C_YEL}[{_ts()}] !  {msg}{C_OFF}", file=sys.stderr, flush=True)
 
 
 def log_error(msg: str) -> None:
     with _log_lock:
+        _erase_display_locked()
         print(f"{C_RED}[{_ts()}] x  {msg}{C_OFF}", file=sys.stderr, flush=True)
+
+
+# ---- Live worker display ----
+#
+# When running in a TTY we pin a status block to the bottom of the terminal
+# showing what every worker is currently doing. Non-TTY runs (cron, piped
+# output) skip the display entirely and fall back to the periodic
+# `progress: N/M` log line in run_jobs.
+
+@dataclass
+class _WorkerState:
+    rel: str
+    op: str  # "clone" or "fetch"
+    started_at: float
+    phase: str = "starting"
+    pct: "int | None" = None  # populated in commit 2
+
+
+class _WorkerRegistry:
+    """Thread-safe map of worker key -> _WorkerState."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._states: dict[int, _WorkerState] = {}
+
+    def start(self, key: int, rel: str, op: str) -> None:
+        with self._lock:
+            self._states[key] = _WorkerState(rel=rel, op=op, started_at=time.monotonic())
+
+    def set_phase(self, key: int, phase: str, pct: "int | None" = None) -> None:
+        with self._lock:
+            st = self._states.get(key)
+            if st is not None:
+                st.phase = phase
+                st.pct = pct
+
+    def finish(self, key: int) -> None:
+        with self._lock:
+            self._states.pop(key, None)
+
+    def snapshot(self) -> list[_WorkerState]:
+        with self._lock:
+            # Sort by start time so the list order is stable as workers come and go.
+            return sorted(self._states.values(), key=lambda s: s.started_at)
+
+
+def _hide_cursor() -> None:
+    if _TTY:
+        sys.stderr.write("\033[?25l")
+        sys.stderr.flush()
+
+
+def _show_cursor() -> None:
+    if _TTY:
+        sys.stderr.write("\033[?25h")
+        sys.stderr.flush()
+
+
+def _cleanup_terminal() -> None:
+    """atexit hook: erase any leftover display block and restore the cursor."""
+    with _log_lock:
+        _erase_display_locked()
+    _show_cursor()
+
+
+atexit.register(_cleanup_terminal)
+
+
+# Re-raise SIGINT after cleaning up. We install this lazily inside _LiveDisplay
+# so non-TTY runs don't alter the default signal behavior.
+_prev_sigint_handler: "object | None" = None
+
+
+def _sigint_handler(signum, frame) -> None:  # noqa: ANN001 — signal handler signature
+    _cleanup_terminal()
+    # Restore prior handler and re-raise so the user's Ctrl-C still terminates.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def _format_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+class _LiveDisplay:
+    """Background thread that renders a pinned status block to stderr."""
+
+    RENDER_INTERVAL = 0.25
+
+    def __init__(
+        self,
+        registry: _WorkerRegistry,
+        outcomes: "OutcomeCollector",
+        total: int,
+        description: str,
+    ) -> None:
+        self._registry = registry
+        self._outcomes = outcomes
+        self._total = total
+        self._description = description
+        self._stop = threading.Event()
+        self._thread: "threading.Thread | None" = None
+        self._started_at = time.monotonic()
+
+    def start(self) -> None:
+        if not _TTY:
+            return
+        global _prev_sigint_handler
+        _prev_sigint_handler = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, _sigint_handler)
+        except ValueError:
+            # signal.signal only works in the main thread; tolerate that.
+            pass
+        _hide_cursor()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=2)
+        with _log_lock:
+            _erase_display_locked()
+        _show_cursor()
+        if _prev_sigint_handler is not None:
+            try:
+                signal.signal(signal.SIGINT, _prev_sigint_handler)
+            except (ValueError, TypeError):
+                pass
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._render()
+            self._stop.wait(self.RENDER_INTERVAL)
+
+    def _render(self) -> None:
+        lines = self._format_lines()
+        with _log_lock:
+            global _display_lines
+            _erase_display_locked()
+            if not lines:
+                return
+            sys.stderr.write("\n".join(lines))
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+            _display_lines = len(lines)
+
+    def _format_lines(self) -> list[str]:
+        width = shutil.get_terminal_size((100, 24)).columns
+        states = self._registry.snapshot()
+        done = len(self._outcomes)
+        elapsed = _format_elapsed(time.monotonic() - self._started_at)
+
+        # Tally outcomes by category for the header counters.
+        counts = {"cloned": 0, "updated": 0, "errors": 0, "skipped": 0}
+        for o in self._outcomes.items:
+            if o.status == Status.CLONED:
+                counts["cloned"] += 1
+            elif o.status == Status.UPDATED:
+                counts["updated"] += 1
+            elif o.status == Status.ERROR:
+                counts["errors"] += 1
+            elif o.status == Status.SKIPPED:
+                counts["skipped"] += 1
+
+        header = (
+            f"{C_DIM}[{elapsed}]{C_OFF} {C_BLD}{self._description}{C_OFF} "
+            f"— {done} / {self._total}"
+        )
+        summary = (
+            f"  {C_GRN}cloned: {counts['cloned']}{C_OFF}  "
+            f"{C_GRN}updated: {counts['updated']}{C_OFF}  "
+            f"{C_RED}errors: {counts['errors']}{C_OFF}  "
+            f"{C_DIM}skipped: {counts['skipped']}{C_OFF}"
+        )
+        workers_header = f"  workers ({len(states)}):"
+
+        out = [header, summary, workers_header]
+        for st in states:
+            out.append(self._format_worker_line(st, width))
+        return out
+
+    def _format_worker_line(self, st: _WorkerState, width: int) -> str:
+        elapsed = _format_elapsed(time.monotonic() - st.started_at)
+        if st.pct is not None:
+            phase_str = f"{st.phase} {st.pct}%"
+        else:
+            phase_str = st.phase
+        prefix = f"    • [{elapsed}] "
+        suffix = f"  {phase_str}"
+        # Reserve room for prefix + suffix; truncate the repo path to fit.
+        budget = max(20, width - len(prefix) - len(suffix) - 1)
+        rel = st.rel
+        if len(rel) > budget:
+            rel = rel[: budget - 1] + "…"
+        return f"{prefix}{rel}{C_DIM}{suffix}{C_OFF}"
 
 
 # ---- Outcome model ----
@@ -371,10 +591,41 @@ def clone_or_update(
     dest: Path,
     branch: str,
     outcomes: OutcomeCollector,
+    registry: "_WorkerRegistry | None" = None,
 ) -> None:
     rel = _rel(dest)
+    key = threading.get_ident()
+    op = "fetch" if (dest / ".git").is_dir() else "clone"
+    if registry is not None:
+        registry.start(key, rel, op)
+
+    try:
+        _clone_or_update_inner(
+            ssh_url=ssh_url, dest=dest, branch=branch,
+            outcomes=outcomes, registry=registry, rel=rel,
+        )
+    finally:
+        if registry is not None:
+            registry.finish(key)
+
+
+def _clone_or_update_inner(
+    *,
+    ssh_url: str,
+    dest: Path,
+    branch: str,
+    outcomes: OutcomeCollector,
+    registry: "_WorkerRegistry | None",
+    rel: str,
+) -> None:
+    key = threading.get_ident()
+
+    def _set_phase(phase: str) -> None:
+        if registry is not None:
+            registry.set_phase(key, phase)
 
     if (dest / ".git").is_dir():
+        _set_phase("fetching")
         # Remove old lock files left behind by killed git processes. Age-gated
         # so we don't clobber an active commit/fetch happening in another window.
         removed = _clean_stale_locks(dest)
@@ -434,6 +685,7 @@ def clone_or_update(
             ))
             return
 
+        _set_phase("merging")
         ff_ok, _ff_out = run_with_retry(
             ["git", "-C", str(dest), "merge", "--ff-only", f"origin/{branch}"],
             description=f"{rel} ff",
@@ -459,6 +711,7 @@ def clone_or_update(
             ))
         return
 
+    _set_phase("cloning")
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     # If the clone fails partway through, it leaves dest half-populated. The
@@ -522,31 +775,49 @@ def clone_or_update(
     outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out)))
 
 
-def run_jobs(jobs: list[Job], outcomes: OutcomeCollector) -> None:
-    with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-        future_to_job = {
-            pool.submit(
-                clone_or_update,
-                ssh_url=j.ssh_url, dest=j.dest, branch=j.branch, outcomes=outcomes,
-            ): j
-            for j in jobs
-        }
-        done = 0
-        total = len(future_to_job)
-        for fut in as_completed(future_to_job):
-            j = future_to_job[fut]
-            try:
-                fut.result()
-            except Exception as e:  # noqa: BLE001 — capture for reporting, don't kill the pool
-                rel = _rel(j.dest)
-                log_error(f"{rel}: worker crashed: {e!r}")
-                outcomes.add(Outcome(
-                    rel=rel, status=Status.ERROR, url=j.ssh_url,
-                    detail=f"worker crashed: {e!r}",
-                ))
-            done += 1
-            if done % 25 == 0 or done == total:
-                log_info(f"progress: {done}/{total}")
+def run_jobs(
+    jobs: list[Job],
+    outcomes: OutcomeCollector,
+    *,
+    description: str = "Sync",
+) -> None:
+    total = len(jobs)
+    registry = _WorkerRegistry()
+    display: "_LiveDisplay | None" = None
+    if _TTY:
+        display = _LiveDisplay(registry, outcomes, total, description)
+        display.start()
+    try:
+        with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+            future_to_job = {
+                pool.submit(
+                    clone_or_update,
+                    ssh_url=j.ssh_url, dest=j.dest, branch=j.branch,
+                    outcomes=outcomes, registry=registry,
+                ): j
+                for j in jobs
+            }
+            done = 0
+            for fut in as_completed(future_to_job):
+                j = future_to_job[fut]
+                try:
+                    fut.result()
+                except Exception as e:  # noqa: BLE001 — capture for reporting, don't kill the pool
+                    rel = _rel(j.dest)
+                    log_error(f"{rel}: worker crashed: {e!r}")
+                    outcomes.add(Outcome(
+                        rel=rel, status=Status.ERROR, url=j.ssh_url,
+                        detail=f"worker crashed: {e!r}",
+                    ))
+                done += 1
+                # Non-TTY runs (cron, redirected output) get the periodic log
+                # line so there's still visible progress; the live display
+                # covers TTY runs.
+                if not _TTY and (done % 25 == 0 or done == total):
+                    log_info(f"progress: {done}/{total}")
+    finally:
+        if display is not None:
+            display.stop()
 
 
 # ---- Stale / non-git directory discovery ----

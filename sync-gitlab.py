@@ -180,7 +180,7 @@ def main() -> int:
 
     log_info(f"Found {len(jobs)} projects to sync. Using {PARALLEL} parallel workers...")
     outcomes = OutcomeCollector()
-    run_jobs(jobs, outcomes)
+    run_jobs(jobs, outcomes, description="GitLab sync")
 
     log_info(f"Scanning {PLATFORM_ROOT} for stale and non-git directories...")
     all_outcomes = finish_run(PLATFORM_ROOT, jobs, skipped, outcomes)
