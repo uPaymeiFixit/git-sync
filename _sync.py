@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import os
 import random
 import re
@@ -562,27 +563,55 @@ _SSH_MUX_ENABLED = os.environ.get("GIT_SYNC_NO_SSH_MUX") != "1"
 # the 40-char %C hash and our dir prefix it can exceed the 104-char UNIX
 # socket path limit. /tmp is short and universally available.
 _CM_DIR = Path("/tmp") / f"git-sync-cm-{os.getuid()}-{os.getpid()}"
-_CM_HOSTS: set[str] = set()
+_CM_HOSTS: "set[tuple[str, int]]" = set()  # (host, shard)
 _CM_HOSTS_LOCK = threading.Lock()
 
+# Pick enough ControlMaster shards per host that we stay well under
+# sshd's MaxSessions=10 default at peak load. ceil(PARALLEL/8) targets
+# ~8 channels per master when all workers happen to be hitting one host
+# — leaves 2 slots of headroom for the inevitable statistical bursts
+# that single-master setups can't absorb.
+MASTERS_PER_HOST = max(1, math.ceil(PARALLEL / 8)) if _SSH_MUX_ENABLED else 1
 
-def _mux_opts() -> str:
-    if not _SSH_MUX_ENABLED:
-        return ""
-    # %C is a hash of (local user, host, port, remote user) — keeps the
-    # socket path well under the platform's UNIX-socket path limit (104 on
-    # macOS) regardless of how long the actual host name is.
-    return (
-        f"-o ControlMaster=auto -o ControlPath={_CM_DIR}/%C "
-        f"-o ControlPersist=120s"
-    )
+# Each worker thread is assigned a shard for the duration of its
+# clone_or_update call so retries hit the same master (warm) and so
+# every git subprocess from the same thread routes through the same
+# socket without plumbing shard through every function signature.
+_ssh_shard_local = threading.local()
+
+
+def _set_ssh_shard(shard: int) -> None:
+    _ssh_shard_local.shard = shard
+
+
+def _clear_ssh_shard() -> None:
+    _ssh_shard_local.shard = None
+
+
+def _shard_for(rel: str) -> int:
+    """Stable hash of the repo path → shard index. Stable so retries land
+    on the master that's already authenticated."""
+    return (hash(rel) & 0x7fffffff) % MASTERS_PER_HOST
+
+
+def _control_path(shard: "int | None") -> str:
+    # When MASTERS_PER_HOST==1 we collapse the s0- prefix so direct sync-*.py
+    # invocations and sync-all runs share a socket dir layout that's easy to
+    # eyeball. With more than one shard we always namespace by shard.
+    if MASTERS_PER_HOST <= 1:
+        return f"{_CM_DIR}/%C"
+    s = shard if shard is not None else 0
+    return f"{_CM_DIR}/s{s}-%C"
 
 
 def _ssh_command() -> str:
     parts = ["ssh", _SSH_TIMEOUT_OPTS]
-    mux = _mux_opts()
-    if mux:
-        parts.append(mux)
+    if _SSH_MUX_ENABLED:
+        shard = getattr(_ssh_shard_local, "shard", None)
+        parts.append(
+            f"-o ControlMaster=auto -o ControlPath={_control_path(shard)} "
+            f"-o ControlPersist=120s"
+        )
     return " ".join(parts)
 
 
@@ -613,10 +642,10 @@ def _unique_ssh_hosts(jobs: "list[Job]") -> "set[str]":
 
 
 def prewarm_ssh_masters(hosts: "set[str]") -> None:
-    """Open a ControlMaster connection per host so the first burst of
-    parallel git ops all ride the existing master instead of racing to
-    create one (which would defeat the purpose and re-spike sshd's
-    MaxStartups counter — the exact problem multiplexing is here to fix)."""
+    """Open MASTERS_PER_HOST ControlMaster connections for each host so
+    the first burst of parallel git ops all ride existing masters instead
+    of racing to create them (defeats the purpose) or stacking on a single
+    master past sshd's MaxSessions=10 limit (fixes the bug)."""
     if not _SSH_MUX_ENABLED or not hosts:
         return
     try:
@@ -624,14 +653,19 @@ def prewarm_ssh_masters(hosts: "set[str]") -> None:
     except OSError as e:
         log_warn(f"could not create SSH control dir {_CM_DIR}: {e}")
         return
-    for host in hosts:
+    # Pre-warm in parallel; serially this would be ~1s per (host, shard)
+    # and at PARALLEL=64 (8 masters) per platform that's a noticeable
+    # startup cost in front of the actual work.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _warm_one(host: str, shard: int) -> None:
         with _CM_HOSTS_LOCK:
-            _CM_HOSTS.add(host)
+            _CM_HOSTS.add((host, shard))
         try:
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes",
                  "-o", "ControlMaster=auto",
-                 "-o", f"ControlPath={_CM_DIR}/%C",
+                 "-o", f"ControlPath={_control_path(shard)}",
                  "-o", "ControlPersist=120s",
                  "-o", "ConnectTimeout=15",
                  host, "true"],
@@ -644,21 +678,27 @@ def prewarm_ssh_masters(hosts: "set[str]") -> None:
             # Pre-warming is best-effort; workers will still try directly.
             pass
 
+    pairs = [(h, s) for h in hosts for s in range(MASTERS_PER_HOST)]
+    if not pairs:
+        return
+    with ThreadPoolExecutor(max_workers=min(len(pairs), 16)) as pool:
+        list(pool.map(lambda hs: _warm_one(*hs), pairs))
+
 
 def _cleanup_ssh_masters() -> None:
     """Close every ControlMaster we opened and remove the socket dir.
-    Without this the master ssh process lingers until ControlPersist
-    (120s) expires, which is fine functionally but holds an idle TCP
-    connection open and leaves a stray /tmp dir."""
+    Without this the master ssh processes linger until ControlPersist
+    (120s) expires, which holds idle TCP connections open and leaves a
+    stray /tmp dir behind."""
     if not _SSH_MUX_ENABLED:
         return
     with _CM_HOSTS_LOCK:
-        hosts = list(_CM_HOSTS)
-    for host in hosts:
+        masters = list(_CM_HOSTS)
+    for host, shard in masters:
         try:
             subprocess.run(
                 ["ssh", "-O", "exit",
-                 "-o", f"ControlPath={_CM_DIR}/%C",
+                 "-o", f"ControlPath={_control_path(shard)}",
                  host],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -961,12 +1001,17 @@ def clone_or_update(
     if registry is not None:
         registry.start(key, rel, op)
 
+    # Pin this thread to one SSH master shard for the life of the call.
+    # Every git subprocess we spawn (fetch / merge / clone / fallback clone)
+    # picks up the same shard via _git_env → _ssh_command → thread-local.
+    _set_ssh_shard(_shard_for(rel))
     try:
         _clone_or_update_inner(
             ssh_url=ssh_url, dest=dest, branch=branch,
             outcomes=outcomes, registry=registry, rel=rel,
         )
     finally:
+        _clear_ssh_shard()
         if registry is not None:
             registry.finish(key)
 
