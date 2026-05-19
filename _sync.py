@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -726,10 +727,17 @@ def run_with_retry(
             # near-identical lines that scroll the useful logs off-screen.
             if not _EVENTS_ENABLED:
                 log_warn(f"{description}: attempt {attempt} failed; retrying in {delay:.0f}s")
+            # Jitter ±50% on the backoff. Many transient failures (sshd
+            # MaxStartups / MaxSessions, server throttling, transient packet
+            # loss) hit several workers at once, and a fixed 2/4/8s schedule
+            # makes all the failed workers retry in lockstep — recreating
+            # the original condition. Spreading the retry window breaks
+            # the herd.
+            sleep_for = delay * random.uniform(0.5, 1.5)
             # Interruptible sleep — if Ctrl-C arrives mid-backoff we want to
-            # bail out instead of sleeping the full 2/4/8 seconds and then
-            # spawning a fresh git subprocess to redownload from scratch.
-            if _stop_event.wait(delay):
+            # bail out instead of sleeping and spawning a fresh git
+            # subprocess to redownload from scratch.
+            if _stop_event.wait(sleep_for):
                 return False, output + "\n[aborted]"
             delay *= 2
     return False, output
