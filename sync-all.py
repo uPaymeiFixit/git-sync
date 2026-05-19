@@ -132,6 +132,16 @@ def _format_elapsed(seconds: float) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
+def _exit_badge(rc: "int | None") -> str:
+    """Human-friendly status for an exited platform: done / skipped / failed.
+    Raw exit codes are opaque in a live display; named badges are the win."""
+    if rc == 0:
+        return f"{C_GRN}done{C_OFF}"
+    if rc == EXIT_SKIPPED:
+        return f"{C_DIM}skipped{C_OFF}"
+    return f"{C_RED}failed (exit {rc}){C_OFF}"
+
+
 class _ParentDisplay:
     RENDER_INTERVAL = 0.25
 
@@ -201,7 +211,7 @@ class _ParentDisplay:
 
         # Header per platform — show progress fraction once we know the total.
         if p.exited:
-            status_str = f"{C_DIM}(exit {p.exit_code}){C_OFF}"
+            status_str = _exit_badge(p.exit_code)
         elif not p.session_started:
             status_str = f"{C_DIM}discovering…{C_OFF}"
         elif p.total == 0:
@@ -254,15 +264,9 @@ def _print_per_platform_status(platforms: "dict[str, _PlatformState]") -> None:
     print(f"{C_BLD}Per-platform results{C_OFF}", file=out)
     name_width = max(len(n) for n in platforms) if platforms else 0
     for name, p in platforms.items():
-        rc = p.exit_code
-        if rc == 0:
-            badge = f"{C_GRN}ok{C_OFF}"
-        elif rc == EXIT_SKIPPED:
-            badge = f"{C_DIM}skipped{C_OFF}"
-        else:
-            badge = f"{C_RED}failed (exit {rc}){C_OFF}"
         desc = p.description or name
         elapsed = _format_elapsed(time.monotonic() - p.proc_started_at)
+        badge = _exit_badge(p.exit_code)
         print(f"  {desc:<{name_width + 16}}  {badge}  {C_DIM}{elapsed}{C_OFF}", file=out)
     print(file=out)
 
