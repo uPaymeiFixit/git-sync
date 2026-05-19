@@ -46,7 +46,8 @@ All configuration is via environment variables. See [.envrc.example](.envrc.exam
 | `GIT_SYNC_SKIP_BITBUCKET`, `GIT_SYNC_SKIP_GITLAB`, `GIT_SYNC_SKIP_GITHUB` | Optional (set to any non-empty value to skip that platform even when configured) |
 | `GIT_SYNC_BITBUCKET_USER`, `GIT_SYNC_BITBUCKET_APP_PASSWORD` | Optional (alternative to `~/.netrc`) |
 | `GIT_SYNC_GITHUB_TOKEN` | Optional (alternative to `~/.netrc`) |
-| `GIT_SYNC_PARALLEL` | Optional (default 8) |
+| `GIT_SYNC_PARALLEL` | Optional (default 8; 24–64 is realistic with SSH multiplexing on) |
+| `GIT_SYNC_NO_SSH_MUX` | Optional (set to `1` to disable SSH `ControlMaster`) |
 | `GIT_SYNC_DEPTH` | Optional (default 100; `0` for full history) |
 | `GIT_SYNC_TIMEOUT` | Optional (default 1800; max seconds per clone/fetch) |
 

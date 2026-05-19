@@ -545,9 +545,44 @@ def _parse_git_progress(line: str) -> "tuple[str, int] | None":
 # handshake; ServerAliveInterval + ServerAliveCountMax detect a connection
 # that goes silent mid-transfer. ~45s ceiling on a hung remote, vs. the
 # previous behavior of hanging up to the full run_with_retry timeout (600s).
-_GIT_SSH_COMMAND = (
-    "ssh -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+_SSH_TIMEOUT_OPTS = (
+    "-o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 )
+
+# SSH connection multiplexing — every git op to the same host rides one
+# authenticated TCP/SSH connection instead of running its own handshake.
+# Lets PARALLEL go much higher without tripping sshd's MaxStartups guard
+# (default 10:30:60 means probabilistic drops once concurrent unauthenticated
+# handshakes pass 10). Each child process gets its own socket directory so
+# parallel sync-platform.py runs don't fight over the same control sockets.
+_SSH_MUX_ENABLED = os.environ.get("GIT_SYNC_NO_SSH_MUX") != "1"
+# Hardcoded /tmp instead of tempfile.gettempdir() — on macOS the per-user
+# temp dir resolves to /var/folders/.../T/ (~50 chars), and combined with
+# the 40-char %C hash and our dir prefix it can exceed the 104-char UNIX
+# socket path limit. /tmp is short and universally available.
+_CM_DIR = Path("/tmp") / f"git-sync-cm-{os.getuid()}-{os.getpid()}"
+_CM_HOSTS: set[str] = set()
+_CM_HOSTS_LOCK = threading.Lock()
+
+
+def _mux_opts() -> str:
+    if not _SSH_MUX_ENABLED:
+        return ""
+    # %C is a hash of (local user, host, port, remote user) — keeps the
+    # socket path well under the platform's UNIX-socket path limit (104 on
+    # macOS) regardless of how long the actual host name is.
+    return (
+        f"-o ControlMaster=auto -o ControlPath={_CM_DIR}/%C "
+        f"-o ControlPersist=120s"
+    )
+
+
+def _ssh_command() -> str:
+    parts = ["ssh", _SSH_TIMEOUT_OPTS]
+    mux = _mux_opts()
+    if mux:
+        parts.append(mux)
+    return " ".join(parts)
 
 
 def _git_env() -> dict:
@@ -557,8 +592,87 @@ def _git_env() -> dict:
         **os.environ,
         "LC_ALL": "C",
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_SSH_COMMAND": _GIT_SSH_COMMAND,
+        "GIT_SSH_COMMAND": _ssh_command(),
     }
+
+
+_SSH_URL_RE = re.compile(r"^(?:([^@:/]+)@)?([^:/]+):")
+
+
+def _unique_ssh_hosts(jobs: "list[Job]") -> "set[str]":
+    """Pull the set of user@host pairs out of a job list's SSH URLs.
+    Used to pre-warm a ControlMaster per host before the worker pool fires."""
+    hosts: set[str] = set()
+    for j in jobs:
+        m = _SSH_URL_RE.match(j.ssh_url)
+        if m:
+            user, host = (m.group(1) or "git"), m.group(2)
+            hosts.add(f"{user}@{host}")
+    return hosts
+
+
+def prewarm_ssh_masters(hosts: "set[str]") -> None:
+    """Open a ControlMaster connection per host so the first burst of
+    parallel git ops all ride the existing master instead of racing to
+    create one (which would defeat the purpose and re-spike sshd's
+    MaxStartups counter — the exact problem multiplexing is here to fix)."""
+    if not _SSH_MUX_ENABLED or not hosts:
+        return
+    try:
+        _CM_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as e:
+        log_warn(f"could not create SSH control dir {_CM_DIR}: {e}")
+        return
+    for host in hosts:
+        with _CM_HOSTS_LOCK:
+            _CM_HOSTS.add(host)
+        try:
+            subprocess.run(
+                ["ssh", "-o", "BatchMode=yes",
+                 "-o", "ControlMaster=auto",
+                 "-o", f"ControlPath={_CM_DIR}/%C",
+                 "-o", "ControlPersist=120s",
+                 "-o", "ConnectTimeout=15",
+                 host, "true"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            # Pre-warming is best-effort; workers will still try directly.
+            pass
+
+
+def _cleanup_ssh_masters() -> None:
+    """Close every ControlMaster we opened and remove the socket dir.
+    Without this the master ssh process lingers until ControlPersist
+    (120s) expires, which is fine functionally but holds an idle TCP
+    connection open and leaves a stray /tmp dir."""
+    if not _SSH_MUX_ENABLED:
+        return
+    with _CM_HOSTS_LOCK:
+        hosts = list(_CM_HOSTS)
+    for host in hosts:
+        try:
+            subprocess.run(
+                ["ssh", "-O", "exit",
+                 "-o", f"ControlPath={_CM_DIR}/%C",
+                 host],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    try:
+        shutil.rmtree(_CM_DIR, ignore_errors=True)
+    except OSError:
+        pass
+
+
+atexit.register(_cleanup_ssh_masters)
 
 
 def run_with_retry(
@@ -1037,6 +1151,7 @@ def run_jobs(
 ) -> None:
     total = len(jobs)
     _emit_event("session_start", description=description, total=total)
+    prewarm_ssh_masters(_unique_ssh_hosts(jobs))
     registry = _WorkerRegistry()
     display: "_LiveDisplay | None" = None
     if _TTY:

@@ -49,8 +49,18 @@ export GIT_SYNC_GITHUB_ORG=your-github-org
 # Create one at: https://github.com/settings/tokens
 # export GIT_SYNC_GITHUB_TOKEN=your-personal-access-token
 
-# OPTIONAL. Number of repos to sync in parallel. Default: 8.
+# OPTIONAL. Number of repos to sync in parallel. Default: 8. With SSH
+# connection multiplexing enabled (the default — see below), values of
+# 24/32/64 are realistic without tripping the remote sshd's MaxStartups
+# guard. Bump until you stop seeing speedups (usually limited by your
+# upstream bandwidth or remote disk I/O, not SSH).
 # export GIT_SYNC_PARALLEL=8
+
+# OPTIONAL. SSH connection multiplexing — every git op to the same host
+# rides one authenticated SSH connection. Default enabled. Set to 1 to
+# disable if your SSH setup has agent-only auth quirks, a Host alias
+# pointing at a control_path you maintain yourself, etc.
+# export GIT_SYNC_NO_SSH_MUX=1
 
 # OPTIONAL. Max seconds for any single git clone or fetch. Default 1800
 # (30 minutes), which fits first-time clones of multi-GB repos with server-
