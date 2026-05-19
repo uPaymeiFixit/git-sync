@@ -39,7 +39,6 @@ PLATFORMS = [
 ]
 
 _TTY = sys.stderr.isatty()
-_MAX_WORKERS_PER_PLATFORM = 5  # cap visible rows so terminal height isn't blown out
 
 
 # ---- Parent-side state model ----
@@ -225,13 +224,8 @@ class _ParentDisplay:
             if parts:
                 lines.append("      " + "  ".join(parts))
 
-        workers = sorted(p.workers.values(), key=lambda w: w.started_at)
-        visible = workers[:_MAX_WORKERS_PER_PLATFORM]
-        hidden = len(workers) - len(visible)
-        for w in visible:
+        for w in sorted(p.workers.values(), key=lambda w: w.started_at):
             lines.append(self._format_worker(w, width))
-        if hidden > 0:
-            lines.append(f"      {C_DIM}…(+{hidden} more){C_OFF}")
         return lines
 
     def _format_worker(self, w: _WorkerView, width: int) -> str:
