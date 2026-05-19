@@ -149,6 +149,7 @@ def main() -> int:
     seen: set[str] = set()
     jobs: list[Job] = []
     skipped: list[Outcome] = []
+    discovery_errors = 0
     for group in groups:
         gid = group["id"]
         try:
@@ -157,6 +158,7 @@ def main() -> int:
             )
         except (RuntimeError, json.JSONDecodeError) as e:
             log_error(f"list projects in group {gid}: {e}")
+            discovery_errors += 1
             continue
         for p in projects:
             branch = p.get("default_branch")
@@ -187,9 +189,12 @@ def main() -> int:
     run_jobs(jobs, outcomes, description="GitLab sync")
 
     log_info(f"Scanning {PLATFORM_ROOT} for stale and non-git directories...")
-    all_outcomes = finish_run(PLATFORM_ROOT, jobs, skipped, outcomes)
+    all_outcomes = finish_run(
+        PLATFORM_ROOT, jobs, skipped, outcomes,
+        discovery_complete=(discovery_errors == 0),
+    )
     had_errors = print_outcome_summary(all_outcomes)
-    if had_errors:
+    if had_errors or discovery_errors:
         log_warn("GitLab sync finished with errors. Re-run to retry.")
         return 1
     log_ok("GitLab sync complete.")

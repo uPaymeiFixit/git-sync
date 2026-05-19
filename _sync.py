@@ -1300,14 +1300,32 @@ def finish_run(
     jobs: list[Job],
     skipped: list[Outcome],
     outcomes: OutcomeCollector,
+    *,
+    discovery_complete: bool = True,
 ) -> list[Outcome]:
     """Combine sync outcomes, skipped repos, and stale/non-git findings.
-    Skipped repo destinations count as 'expected' so they aren't flagged as stale.
+    Skipped repo destinations count as 'expected' so they aren't flagged as
+    stale.
+
+    discovery_complete=False means the remote listing wasn't fully retrieved
+    (e.g. transient API errors during pagination). In that case stale-on-disk
+    detection is wrong by construction — every repo we failed to enumerate
+    would be flagged as 'deleted upstream' — so we skip the on-disk scan
+    entirely and warn loudly. The user should re-run after fixing the
+    network issue.
     """
     expected = {j.dest for j in jobs}
     for o in skipped:
         expected.add(SYNC_ROOT / o.rel)
-    extras = discover_extras(platform_root, expected)
+    if discovery_complete:
+        extras = discover_extras(platform_root, expected)
+    else:
+        extras = []
+        log_warn(
+            "Skipping stale-on-disk scan: remote discovery had errors "
+            "(see above). Re-run once the issue is resolved to get an "
+            "accurate listing."
+        )
     # Skipped + extras come from the platform script / disk scan, not through
     # OutcomeCollector, so they haven't been emitted yet. Send them upstream
     # so the parent's unified summary sees the full picture.
