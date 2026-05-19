@@ -409,6 +409,7 @@ class _LiveDisplay:
 class Status(str, Enum):
     CLONED = "cloned"
     UPDATED = "updated"
+    UPDATED_DIRTY = "updated-dirty"
     UP_TO_DATE = "up-to-date"
     EMPTY_REMOTE = "empty-remote"
     DIRTY = "dirty"
@@ -1087,9 +1088,7 @@ def _clone_or_update_inner(
                 outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
             return
 
-        if _is_dirty(dest):
-            outcomes.add(Outcome(rel, Status.DIRTY, url=ssh_url))
-            return
+        was_dirty = _is_dirty(dest)
 
         cur_branch = _current_branch(dest)
         if cur_branch != branch:
@@ -1104,27 +1103,41 @@ def _clone_or_update_inner(
             return
 
         _set_phase("merging")
-        ff_ok, _ff_out = run_with_retry(
+        # Let git decide whether the FF is safe. With uncommitted changes on
+        # non-colliding paths git happily fast-forwards and preserves them; on
+        # colliding paths it refuses with "would be overwritten by merge",
+        # which we classify as DIRTY below.
+        ff_ok, ff_out = run_with_retry(
             ["git", "-C", str(dest), "merge", "--ff-only", f"origin/{branch}"],
             description=f"{rel} ff",
             attempts=1,
         )
         if not ff_ok:
-            ahead = _count_commits_between(dest, f"origin/{branch}", "HEAD")
-            outcomes.add(Outcome(
-                rel, Status.DIVERGED, url=ssh_url,
-                detail=f"local '{branch}' has commits not on origin/{branch}",
-                commits_ahead=ahead,
-            ))
+            if was_dirty:
+                outcomes.add(Outcome(
+                    rel, Status.DIRTY, url=ssh_url,
+                    detail="uncommitted changes blocked fast-forward",
+                ))
+            else:
+                ahead = _count_commits_between(dest, f"origin/{branch}", "HEAD")
+                outcomes.add(Outcome(
+                    rel, Status.DIVERGED, url=ssh_url,
+                    detail=f"local '{branch}' has commits not on origin/{branch}",
+                    commits_ahead=ahead,
+                ))
             return
 
         new_sha = _head_sha(dest)
         if new_sha == old_sha:
-            outcomes.add(Outcome(rel, Status.UP_TO_DATE, url=ssh_url))
+            if was_dirty:
+                outcomes.add(Outcome(rel, Status.DIRTY, url=ssh_url, detail="up-to-date with uncommitted changes"))
+            else:
+                outcomes.add(Outcome(rel, Status.UP_TO_DATE, url=ssh_url))
         else:
             n = _count_commits_between(dest, old_sha, new_sha)
+            status = Status.UPDATED_DIRTY if was_dirty else Status.UPDATED
             outcomes.add(Outcome(
-                rel, Status.UPDATED, url=ssh_url,
+                rel, status, url=ssh_url,
                 old_sha=old_sha[:7], new_sha=new_sha[:7], commits_ahead=n,
             ))
         return
@@ -1401,6 +1414,10 @@ _STATUS_META: dict[Status, _StatusMeta] = {
         "↑", C_GRN, "Updated",
         "local branch fast-forwarded to new remote tip",
     ),
+    Status.UPDATED_DIRTY: _StatusMeta(
+        "↑", C_YEL, "Updated (over uncommitted changes)",
+        "fast-forwarded to new remote tip; uncommitted changes on non-colliding paths were preserved",
+    ),
     Status.UP_TO_DATE: _StatusMeta(
         "=", C_DIM, "",
         "",
@@ -1443,6 +1460,7 @@ _STATUS_META: dict[Status, _StatusMeta] = {
 _SUMMARY_ORDER: list[Status] = [
     Status.CLONED,
     Status.UPDATED,
+    Status.UPDATED_DIRTY,
     Status.DIRTY,
     Status.DIVERGED,
     Status.BRANCH_MISSING,
@@ -1456,9 +1474,10 @@ _SUMMARY_ORDER: list[Status] = [
 def _format_outcome_line(o: Outcome) -> str:
     meta = _STATUS_META[o.status]
     line = f"  {meta.color}{meta.glyph}{C_OFF} {o.rel}"
-    if o.status == Status.UPDATED and o.old_sha and o.new_sha:
+    if o.status in (Status.UPDATED, Status.UPDATED_DIRTY) and o.old_sha and o.new_sha:
         s = "s" if o.commits_ahead != 1 else ""
-        line += f"  {C_DIM}{o.old_sha} → {o.new_sha}  ({o.commits_ahead} commit{s}){C_OFF}"
+        suffix = "  [dirty]" if o.status == Status.UPDATED_DIRTY else ""
+        line += f"  {C_DIM}{o.old_sha} → {o.new_sha}  ({o.commits_ahead} commit{s}){suffix}{C_OFF}"
         return line
 
     if o.status == Status.DIVERGED:

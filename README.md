@@ -68,7 +68,7 @@ Or invoke by full path from anywhere — cwd doesn't matter, the scripts use `GI
 
 ## Behavior
 
-For each repo: clone if missing, otherwise fetch + fast-forward the default branch when safe. **Never** force, reset, or overwrite local work — dirty trees and diverged branches are reported, not touched. End-of-run summary categorizes every repo (see the legend the script prints).
+For each repo: clone if missing, otherwise fetch + fast-forward the default branch when safe. **Never** force, reset, or overwrite local work. Uncommitted changes on non-colliding paths are preserved across the fast-forward (so leaving e.g. `.vscode/settings.json` edited won't block updates); if your changes would collide with incoming files, git refuses and the repo is reported as dirty instead. Diverged branches (local commits not on remote) are reported, not touched. End-of-run summary categorizes every repo (see the legend the script prints).
 
 ## Skipping repos
 
