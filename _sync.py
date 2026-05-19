@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import re
 import shutil
@@ -139,6 +140,28 @@ def log_error(msg: str) -> None:
         print(f"{C_RED}[{_ts()}] x  {msg}{C_OFF}", file=sys.stderr, flush=True)
 
 
+# ---- Event emission (for sync-all.py to drive a unified live display) ----
+#
+# When a parent (sync-all.py) drives multiple platform syncs, it needs to
+# render one combined live display showing every active worker across all
+# platforms. To enable that, children emit JSON-line state events on stdout
+# tagged with a marker prefix. The parent's pump distinguishes event lines
+# from regular log output and updates its own state model.
+
+_EVENTS_ENABLED = os.environ.get("GIT_SYNC_EVENTS") == "1"
+EVENTS_PREFIX = "\x1eGSE "  # ASCII record-separator + literal "GSE "
+_event_lock = threading.Lock()
+
+
+def _emit_event(kind: str, **fields: object) -> None:
+    if not _EVENTS_ENABLED:
+        return
+    line = EVENTS_PREFIX + json.dumps({"kind": kind, **fields}, separators=(",", ":"))
+    with _event_lock:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+
 # ---- Live worker display ----
 #
 # When running in a TTY we pin a status block to the bottom of the terminal
@@ -152,7 +175,11 @@ class _WorkerState:
     op: str  # "clone" or "fetch"
     started_at: float
     phase: str = "starting"
-    pct: "int | None" = None  # populated in commit 2
+    pct: "int | None" = None
+    # Throttling for event emission — every set_phase call updates local
+    # state but only sends an event up to the parent at most ~10x/sec.
+    _last_event_at: float = 0.0
+    _last_event_phase: str = ""
 
 
 class _WorkerRegistry:
@@ -165,17 +192,40 @@ class _WorkerRegistry:
     def start(self, key: int, rel: str, op: str) -> None:
         with self._lock:
             self._states[key] = _WorkerState(rel=rel, op=op, started_at=time.monotonic())
+        _emit_event("worker_start", rel=rel, op=op)
 
     def set_phase(self, key: int, phase: str, pct: "int | None" = None) -> None:
+        emit = False
+        rel = ""
         with self._lock:
             st = self._states.get(key)
-            if st is not None:
-                st.phase = phase
-                st.pct = pct
+            if st is None:
+                return
+            st.phase = phase
+            st.pct = pct
+            rel = st.rel
+            if _EVENTS_ENABLED:
+                now = time.monotonic()
+                # Always emit on phase change or completion (pct=100); otherwise
+                # throttle to ~10Hz to keep the parent's pump from drowning in
+                # 1%-step updates from many workers.
+                if (phase != st._last_event_phase
+                        or pct in (None, 100)
+                        or (now - st._last_event_at) >= 0.1):
+                    emit = True
+                    st._last_event_at = now
+                    st._last_event_phase = phase
+        if emit:
+            _emit_event("worker_phase", rel=rel, phase=phase, pct=pct)
 
     def finish(self, key: int) -> None:
+        rel = ""
         with self._lock:
-            self._states.pop(key, None)
+            st = self._states.pop(key, None)
+            if st is not None:
+                rel = st.rel
+        if rel:
+            _emit_event("worker_finish", rel=rel)
 
     def snapshot(self) -> list[_WorkerState]:
         with self._lock:
@@ -373,6 +423,7 @@ class OutcomeCollector:
     def add(self, o: Outcome) -> None:
         with self._lock:
             self._items.append(o)
+        _emit_event("outcome", rel=o.rel, status=o.status.value)
 
     @property
     def items(self) -> list[Outcome]:
@@ -931,6 +982,7 @@ def run_jobs(
     description: str = "Sync",
 ) -> None:
     total = len(jobs)
+    _emit_event("session_start", description=description, total=total)
     registry = _WorkerRegistry()
     display: "_LiveDisplay | None" = None
     if _TTY:
@@ -961,12 +1013,15 @@ def run_jobs(
                 done += 1
                 # Non-TTY runs (cron, redirected output) get the periodic log
                 # line so there's still visible progress; the live display
-                # covers TTY runs.
-                if not _TTY and (done % 25 == 0 or done == total):
+                # covers TTY runs. Suppress when events are enabled — the
+                # parent (sync-all.py) renders its own live block.
+                if (not _TTY and not _EVENTS_ENABLED
+                        and (done % 25 == 0 or done == total)):
                     log_info(f"progress: {done}/{total}")
     finally:
         if display is not None:
             display.stop()
+        _emit_event("session_end", description=description)
 
 
 # ---- Stale / non-git directory discovery ----
