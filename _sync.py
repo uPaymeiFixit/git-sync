@@ -96,6 +96,17 @@ C_OFF = "\033[0m" if _TTY else ""
 
 _log_lock = threading.Lock()
 
+# Set when the user hits Ctrl-C. Workers check this before each retry sleep
+# and before spawning a new subprocess so the script stops generating new
+# work promptly instead of riding out 14+ seconds of retry backoffs (during
+# which it would otherwise re-download what SIGINT had just killed).
+_stop_event = threading.Event()
+
+
+def stop_requested() -> bool:
+    return _stop_event.is_set()
+
+
 # When a LiveDisplay is active it pins a status block at the bottom of the
 # terminal. Log writes need to scroll *above* that block, so they erase it
 # before writing and the next render redraws it. We track the line count
@@ -255,16 +266,31 @@ def _cleanup_terminal() -> None:
 atexit.register(_cleanup_terminal)
 
 
-# Re-raise SIGINT after cleaning up. We install this lazily inside _LiveDisplay
-# so non-TTY runs don't alter the default signal behavior.
 _prev_sigint_handler: "object | None" = None
 
 
 def _sigint_handler(signum, frame) -> None:  # noqa: ANN001 — signal handler signature
+    # First Ctrl-C: set the stop event so workers stop spawning new git
+    # subprocesses, clean up the terminal, and return. The pool drains on its
+    # own as workers see the flag and bail. A second Ctrl-C escalates to the
+    # default handler (immediate terminate) — useful when a worker is stuck
+    # in a syscall and won't notice the flag.
+    if _stop_event.is_set():
+        # Second Ctrl-C: hand off to the default handler so the process dies.
+        _cleanup_terminal()
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
+        return
+    _stop_event.set()
     _cleanup_terminal()
-    # Restore prior handler and re-raise so the user's Ctrl-C still terminates.
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    os.kill(os.getpid(), signal.SIGINT)
+    try:
+        sys.stderr.write(
+            "\n[stopping — workers will finish current step, "
+            "Ctrl-C again to force exit]\n"
+        )
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 — write inside a signal handler is best-effort
+        pass
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -295,13 +321,6 @@ class _LiveDisplay:
     def start(self) -> None:
         if not _TTY:
             return
-        global _prev_sigint_handler
-        _prev_sigint_handler = signal.getsignal(signal.SIGINT)
-        try:
-            signal.signal(signal.SIGINT, _sigint_handler)
-        except ValueError:
-            # signal.signal only works in the main thread; tolerate that.
-            pass
         _hide_cursor()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -314,11 +333,6 @@ class _LiveDisplay:
         with _log_lock:
             _erase_display_locked()
         _show_cursor()
-        if _prev_sigint_handler is not None:
-            try:
-                signal.signal(signal.SIGINT, _prev_sigint_handler)
-            except (ValueError, TypeError):
-                pass
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -557,6 +571,8 @@ def run_with_retry(
     delay = backoff
     output = ""
     for attempt in range(1, attempts + 1):
+        if _stop_event.is_set():
+            return False, output + "\n[aborted]"
         if attempt > 1 and on_retry is not None:
             try:
                 on_retry()
@@ -580,7 +596,11 @@ def run_with_retry(
             # near-identical lines that scroll the useful logs off-screen.
             if not _EVENTS_ENABLED:
                 log_warn(f"{description}: attempt {attempt} failed; retrying in {delay:.0f}s")
-            time.sleep(delay)
+            # Interruptible sleep — if Ctrl-C arrives mid-backoff we want to
+            # bail out instead of sleeping the full 2/4/8 seconds and then
+            # spawning a fresh git subprocess to redownload from scratch.
+            if _stop_event.wait(delay):
+                return False, output + "\n[aborted]"
             delay *= 2
     return False, output
 
@@ -612,8 +632,12 @@ def _run_streaming(
     timed_out = False
     assert proc.stdout is not None
     fd = proc.stdout.fileno()
+    aborted = False
     try:
         while True:
+            if _stop_event.is_set():
+                aborted = True
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -636,7 +660,7 @@ def _run_streaming(
             buf.extend(chunk)
             _drain_lines(buf, captured, on_line)
     finally:
-        if timed_out:
+        if timed_out or aborted:
             try:
                 proc.kill()
             except OSError:
@@ -674,6 +698,8 @@ def _run_streaming(
     if timed_out:
         output = output + f"\n[timed out after {timeout}s]"
         return False, output, True
+    if aborted:
+        return False, output + "\n[aborted]", False
     return proc.returncode == 0, output, False
 
 
@@ -785,6 +811,13 @@ def clone_or_update(
     registry: "_WorkerRegistry | None" = None,
 ) -> None:
     rel = _rel(dest)
+    # Bail before doing any work if the user has already pressed Ctrl-C —
+    # ThreadPoolExecutor has no way to cancel queued futures, so each worker
+    # has to gate itself. Without this, every queued job would spawn its
+    # own git subprocess after the kill and continue downloading.
+    if _stop_event.is_set():
+        outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail="aborted"))
+        return
     key = threading.get_ident()
     op = "fetch" if (dest / ".git").is_dir() else "clone"
     if registry is not None:
@@ -993,6 +1026,18 @@ def run_jobs(
     if _TTY:
         display = _LiveDisplay(registry, outcomes, total, description)
         display.start()
+
+    # Install our SIGINT handler so Ctrl-C sets _stop_event (workers see it
+    # and bail) instead of raising KeyboardInterrupt while workers continue
+    # spawning fresh git subprocesses. Saved + restored around this run so
+    # importing _sync from a notebook/REPL doesn't permanently capture SIGINT.
+    global _prev_sigint_handler
+    _prev_sigint_handler = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+    except ValueError:
+        # signal.signal only works in the main thread.
+        _prev_sigint_handler = None
     try:
         with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
             future_to_job = {
@@ -1027,6 +1072,11 @@ def run_jobs(
         if display is not None:
             display.stop()
         _emit_event("session_end", description=description)
+        if _prev_sigint_handler is not None:
+            try:
+                signal.signal(signal.SIGINT, _prev_sigint_handler)
+            except (ValueError, TypeError):
+                pass
 
 
 # ---- Stale / non-git directory discovery ----

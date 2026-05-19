@@ -302,11 +302,38 @@ def _pump_child(
 
 
 # ---- Signal handling ----
+#
+# Two-stage Ctrl-C: the terminal sends SIGINT to the whole foreground
+# process group, so every child also receives it directly. Each child's
+# _sync.py SIGINT handler sets a stop flag that makes its workers stop
+# spawning new git subprocesses and drain quickly. The parent's job is to
+# (a) keep the live block tidy on the way out and (b) escalate to SIGTERM
+# if a stuck child doesn't exit promptly after the second Ctrl-C.
 
-_orig_sigint = signal.getsignal(signal.SIGINT)
+_interrupts = 0
+_procs_for_handler: "list[tuple[str, subprocess.Popen]]" = []
 
 
 def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+    global _interrupts
+    _interrupts += 1
+    if _interrupts == 1:
+        try:
+            sys.stderr.write(
+                "\n[stopping — children are draining, Ctrl-C again to force kill]\n"
+            )
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    # Second (or later) Ctrl-C: escalate to SIGTERM on any still-running child,
+    # then hand off to the default handler so a third Ctrl-C terminates us.
+    for _, p in _procs_for_handler:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
     _cleanup_terminal()
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     os.kill(os.getpid(), signal.SIGINT)
@@ -340,6 +367,11 @@ def main() -> int:
         t.start()
         procs.append((name, p))
         pumps.append(t)
+
+    # Give the signal handler a reference to running children so it can
+    # send SIGTERM on the second Ctrl-C.
+    global _procs_for_handler
+    _procs_for_handler = procs
 
     display = _ParentDisplay(platforms)
     global _active_display
