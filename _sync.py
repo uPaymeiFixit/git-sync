@@ -429,6 +429,22 @@ class Outcome:
     commits_ahead: int = 0
 
 
+def _emit_outcome_event(o: Outcome) -> None:
+    """Send a full Outcome up to the parent (sync-all.py) so the parent
+    can rebuild the same object and render one unified summary covering
+    every platform, instead of three separate per-platform summaries."""
+    _emit_event(
+        "outcome",
+        rel=o.rel,
+        status=o.status.value,
+        url=o.url,
+        detail=o.detail,
+        old_sha=o.old_sha,
+        new_sha=o.new_sha,
+        commits_ahead=o.commits_ahead,
+    )
+
+
 class OutcomeCollector:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -437,7 +453,7 @@ class OutcomeCollector:
     def add(self, o: Outcome) -> None:
         with self._lock:
             self._items.append(o)
-        _emit_event("outcome", rel=o.rel, status=o.status.value)
+        _emit_outcome_event(o)
 
     @property
     def items(self) -> list[Outcome]:
@@ -1169,6 +1185,14 @@ def finish_run(
     for o in skipped:
         expected.add(SYNC_ROOT / o.rel)
     extras = discover_extras(platform_root, expected)
+    # Skipped + extras come from the platform script / disk scan, not through
+    # OutcomeCollector, so they haven't been emitted yet. Send them upstream
+    # so the parent's unified summary sees the full picture.
+    if _EVENTS_ENABLED:
+        for o in skipped:
+            _emit_outcome_event(o)
+        for o in extras:
+            _emit_outcome_event(o)
     return outcomes.items + skipped + extras
 
 
@@ -1268,12 +1292,21 @@ def _format_outcome_line(o: Outcome) -> str:
 
 
 def print_outcome_summary(outcomes: list[Outcome]) -> bool:
-    """Print the summary table. Returns True if there were error outcomes."""
-    out = sys.stderr
+    """Print the summary table. Returns True if there were error outcomes.
+
+    When events are enabled, returns the had_errors signal without printing
+    anything — sync-all.py renders one unified summary at the very end
+    instead of three separate per-platform summaries.
+    """
     grouped: dict[Status, list[Outcome]] = {s: [] for s in Status}
     for o in outcomes:
         grouped[o.status].append(o)
+    had_errors = bool(grouped[Status.ERROR])
 
+    if _EVENTS_ENABLED:
+        return had_errors
+
+    out = sys.stderr
     total = len(outcomes)
 
     print(file=out)
@@ -1290,6 +1323,12 @@ def print_outcome_summary(outcomes: list[Outcome]) -> bool:
             continue  # suppressed from summary listing
         any_printed = True
         print(f"{C_BLD}{meta.title} ({len(items)}){C_OFF}", file=out)
+        # SKIPPED is the user's own GIT_SYNC_SKIP list — they configured
+        # it, they already know what's in it. Listing every match buries
+        # the actually-actionable sections (Dirty, Diverged, Errors).
+        if status == Status.SKIPPED:
+            print(file=out)
+            continue
         for o in sorted(items, key=lambda x: x.rel):
             print(_format_outcome_line(o), file=out)
         print(file=out)
@@ -1318,4 +1357,4 @@ def print_outcome_summary(outcomes: list[Outcome]) -> bool:
     print(file=out)
     print(f"{C_BLD}=================================={C_OFF}", file=out)
 
-    return bool(grouped[Status.ERROR])
+    return had_errors

@@ -30,6 +30,7 @@ sys.path.insert(0, str(HERE))
 from _sync import (  # noqa: E402
     EVENTS_PREFIX, EXIT_SKIPPED,
     C_BLD, C_CYA, C_DIM, C_GRN, C_OFF, C_RED, C_YEL,
+    Outcome, Status, print_outcome_summary,
 )
 
 PLATFORMS = [
@@ -60,6 +61,7 @@ class _PlatformState:
     total: int = 0
     workers: dict[str, _WorkerView] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
+    outcomes: list[Outcome] = field(default_factory=list)
     session_started: bool = False
     session_ended: bool = False
     exited: bool = False
@@ -243,6 +245,28 @@ class _ParentDisplay:
         return f"{prefix}{rel}{C_DIM}{suffix}{C_OFF}"
 
 
+def _print_per_platform_status(platforms: "dict[str, _PlatformState]") -> None:
+    """Print a compact per-platform header above the unified summary so the
+    user can tell at a glance which platforms ran, were skipped, or failed
+    before they even started syncing."""
+    out = sys.stderr
+    print(file=out)
+    print(f"{C_BLD}Per-platform results{C_OFF}", file=out)
+    name_width = max(len(n) for n in platforms) if platforms else 0
+    for name, p in platforms.items():
+        rc = p.exit_code
+        if rc == 0:
+            badge = f"{C_GRN}ok{C_OFF}"
+        elif rc == EXIT_SKIPPED:
+            badge = f"{C_DIM}skipped{C_OFF}"
+        else:
+            badge = f"{C_RED}failed (exit {rc}){C_OFF}"
+        desc = p.description or name
+        elapsed = _format_elapsed(time.monotonic() - p.proc_started_at)
+        print(f"  {desc:<{name_width + 16}}  {badge}  {C_DIM}{elapsed}{C_OFF}", file=out)
+    print(file=out)
+
+
 # ---- Event + log pump ----
 
 def _handle_event(name: str, platforms: "dict[str, _PlatformState]", payload: dict) -> None:
@@ -271,9 +295,23 @@ def _handle_event(name: str, platforms: "dict[str, _PlatformState]", payload: di
     elif kind == "worker_finish":
         p.workers.pop(payload.get("rel", ""), None)
     elif kind == "outcome":
-        status = payload.get("status", "")
-        if status:
-            p.counts[status] = p.counts.get(status, 0) + 1
+        status_str = payload.get("status", "")
+        if not status_str:
+            return
+        p.counts[status_str] = p.counts.get(status_str, 0) + 1
+        try:
+            status = Status(status_str)
+        except ValueError:
+            return  # unknown status — skip rather than crash on a future enum value
+        p.outcomes.append(Outcome(
+            rel=payload.get("rel", ""),
+            status=status,
+            url=payload.get("url", ""),
+            detail=payload.get("detail", ""),
+            old_sha=payload.get("old_sha", ""),
+            new_sha=payload.get("new_sha", ""),
+            commits_ahead=int(payload.get("commits_ahead", 0) or 0),
+        ))
 
 
 def _pump_child(
@@ -381,6 +419,11 @@ def main() -> int:
             t.join(timeout=2)
     finally:
         display.stop()
+
+    _print_per_platform_status(platforms)
+    combined = [o for p in platforms.values() for o in p.outcomes]
+    if combined:
+        print_outcome_summary(combined)
 
     failures = sum(1 for _, p in procs if p.returncode not in (0, EXIT_SKIPPED))
     skipped = sum(1 for _, p in procs if p.returncode == EXIT_SKIPPED)
