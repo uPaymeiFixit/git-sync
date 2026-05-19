@@ -432,6 +432,34 @@ def _clean_stale_locks(repo: Path) -> list[str]:
     return removed
 
 
+# Parse git's --progress output. Lines look like:
+#   "Receiving objects:  45% (40460/89912), 1.42 GiB | 6.04 MiB/s"
+#   "remote: Compressing objects:  43% (33513/78006)"
+# Phases come in this rough order: enumerating -> counting -> compressing
+# -> receiving -> resolving -> updating. Receiving is usually the dominant
+# wall-clock phase for large clones.
+_GIT_PROGRESS_RE = re.compile(
+    r"^(?:remote:\s+)?"
+    r"(Enumerating|Counting|Compressing|Receiving|Resolving|Updating)"
+    r"[^:]*:\s+(\d+)%"
+)
+_PHASE_DISPLAY = {
+    "Enumerating": "enumerating",
+    "Counting": "counting",
+    "Compressing": "compressing",
+    "Receiving": "receiving",
+    "Resolving": "resolving",
+    "Updating": "updating",
+}
+
+
+def _parse_git_progress(line: str) -> "tuple[str, int] | None":
+    m = _GIT_PROGRESS_RE.match(line)
+    if not m:
+        return None
+    return _PHASE_DISPLAY[m.group(1)], int(m.group(2))
+
+
 # Bound SSH connection hangs. ConnectTimeout caps the initial TCP/SSH
 # handshake; ServerAliveInterval + ServerAliveCountMax detect a connection
 # that goes silent mid-transfer. ~45s ceiling on a hung remote, vs. the
@@ -460,12 +488,18 @@ def run_with_retry(
     backoff: float = 2.0,
     timeout: "int | None" = None,
     on_retry: "Callable[[], None] | None" = None,
+    on_line: "Callable[[str], None] | None" = None,
 ) -> tuple[bool, str]:
     """Run cmd with retry/backoff. Returns (ok, combined_output).
 
     If on_retry is provided, it is called before every attempt after the first.
     Useful for cleaning up partial state (e.g. a half-created clone destination)
     so subsequent attempts don't fail on artifacts of the prior failure.
+
+    If on_line is provided, it is called for each output line as it's
+    produced. Lines are split on either '\\n' or '\\r' — git's --progress
+    output updates the same line in-place via carriage return, and we need
+    to surface those updates to the live display, not wait for the next '\\n'.
     """
     if timeout is None:
         timeout = TIMEOUT
@@ -478,39 +512,140 @@ def run_with_retry(
             except Exception as e:  # noqa: BLE001 — cleanup is best-effort
                 log_warn(f"{description}: on_retry cleanup failed: {e!r}")
         try:
-            result = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env=_git_env(),
-            )
-            output = result.stdout or ""
-            rc = result.returncode
-        except subprocess.TimeoutExpired as e:
-            # e.stdout can come back as bytes even when text=True (Python subprocess
-            # quirk when the timeout fires before the text decoder runs).
-            captured = e.stdout or ""
-            if isinstance(captured, bytes):
-                captured = captured.decode("utf-8", errors="replace")
-            output = captured + f"\n[timed out after {timeout}s]"
+            ok, output, timed_out = _run_streaming(cmd, timeout=timeout, on_line=on_line)
+        except FileNotFoundError as e:
+            return False, f"command not found: {e}"
+        if timed_out:
             # A timeout means "operation just takes longer than `timeout` seconds";
             # retrying won't help, only burns time. Surface the timeout error
             # immediately instead of wasting two more attempts.
             return False, output
-        except FileNotFoundError as e:
-            return False, f"command not found: {e}"
-        if rc == 0:
+        if ok:
             return True, output
         if attempt < attempts:
             log_warn(f"{description}: attempt {attempt} failed; retrying in {delay:.0f}s")
             time.sleep(delay)
             delay *= 2
     return False, output
+
+
+def _run_streaming(
+    cmd: list[str],
+    *,
+    timeout: int,
+    on_line: "Callable[[str], None] | None",
+) -> tuple[bool, str, bool]:
+    """Run cmd, streaming output. Returns (ok, captured_output, timed_out).
+
+    Splits on '\\n' or '\\r' so git's --progress carriage-return updates
+    surface immediately. Enforces timeout manually since Popen has no
+    timeout= parameter (subprocess.run's `timeout` kwarg uses a watcher
+    thread we'd otherwise reimplement).
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,  # unbuffered — \r-updated progress lines arrive promptly
+        env=_git_env(),
+    )
+    deadline = time.monotonic() + timeout
+    captured: list[str] = []
+    buf = bytearray()
+    timed_out = False
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            # select() with the remaining-time budget — wakes immediately on
+            # output, sleeps at most until the deadline. Avoids tight polling.
+            import select
+            rlist, _, _ = select.select([fd], [], [], min(0.5, remaining))
+            if not rlist:
+                if proc.poll() is not None:
+                    # Process exited; drain any final bytes below.
+                    break
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break  # EOF — child closed stdout
+            buf.extend(chunk)
+            _drain_lines(buf, captured, on_line)
+    finally:
+        if timed_out:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        # Drain whatever else is in the pipe (process may have closed it
+        # after our last read), then wait. Bounded read so a misbehaving
+        # child can't keep us here forever.
+        try:
+            tail = proc.stdout.read()
+            if tail:
+                buf.extend(tail)
+        except OSError:
+            pass
+        _drain_lines(buf, captured, on_line)
+        if buf:
+            # Trailing partial line with no terminator.
+            line = buf.decode("utf-8", errors="replace")
+            captured.append(line)
+            if on_line is not None:
+                try:
+                    on_line(line)
+                except Exception:  # noqa: BLE001 — callback errors must not kill the run
+                    pass
+            buf.clear()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            proc.wait()
+
+    output = "\n".join(captured)
+    if timed_out:
+        output = output + f"\n[timed out after {timeout}s]"
+        return False, output, True
+    return proc.returncode == 0, output, False
+
+
+def _drain_lines(
+    buf: bytearray,
+    captured: list[str],
+    on_line: "Callable[[str], None] | None",
+) -> None:
+    """Pull complete lines out of buf, splitting on '\\n' or '\\r'."""
+    while True:
+        # Find earliest line terminator.
+        nl = buf.find(b"\n")
+        cr = buf.find(b"\r")
+        candidates = [x for x in (nl, cr) if x >= 0]
+        if not candidates:
+            return
+        idx = min(candidates)
+        raw = bytes(buf[:idx])
+        del buf[: idx + 1]
+        if not raw:
+            continue
+        line = raw.decode("utf-8", errors="replace")
+        captured.append(line)
+        if on_line is not None:
+            try:
+                on_line(line)
+            except Exception:  # noqa: BLE001 — callback errors must not kill the run
+                pass
 
 
 def _git(repo: Path, *args: str) -> tuple[int, str]:
@@ -624,6 +759,15 @@ def _clone_or_update_inner(
         if registry is not None:
             registry.set_phase(key, phase)
 
+    def _on_line(line: str) -> None:
+        if registry is None:
+            return
+        parsed = _parse_git_progress(line)
+        if parsed is None:
+            return
+        phase, pct = parsed
+        registry.set_phase(key, phase, pct)
+
     if (dest / ".git").is_dir():
         _set_phase("fetching")
         # Remove old lock files left behind by killed git processes. Age-gated
@@ -638,9 +782,11 @@ def _clone_or_update_inner(
         # Re-fetching will fail again with empty output; don't spam retry warnings.
         was_empty = not _has_any_ref(dest)
         ok, out = run_with_retry(
-            ["git", "-C", str(dest), "fetch", *_depth_args(), "--prune", "origin"],
+            ["git", "-C", str(dest), "fetch", "--progress",
+             *_depth_args(), "--prune", "origin"],
             description=f"{rel} fetch",
             attempts=1 if was_empty else 3,
+            on_line=_on_line,
         )
         if not ok:
             # `git fetch` returns nonzero with empty output when the remote has no refs
@@ -734,10 +880,11 @@ def _clone_or_update_inner(
         # every remote branch ref ends up in refs/remotes/origin/*. GUIs and
         # `git checkout` can then discover and switch to any branch a teammate
         # publishes, instead of being locked to the default branch forever.
-        ["git", "clone", *_depth_args(), "--no-single-branch",
+        ["git", "clone", "--progress", *_depth_args(), "--no-single-branch",
          "--branch", branch, ssh_url, str(dest)],
         description=f"{rel} clone",
         on_retry=_cleanup_partial_clone,
+        on_line=_on_line,
     )
     if ok:
         outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url))
@@ -756,9 +903,11 @@ def _clone_or_update_inner(
         if dest.exists():
             shutil.rmtree(dest)
         ok2, out2 = run_with_retry(
-            ["git", "clone", *_depth_args(), "--no-single-branch", ssh_url, str(dest)],
+            ["git", "clone", "--progress", *_depth_args(),
+             "--no-single-branch", ssh_url, str(dest)],
             description=f"{rel} clone (no branch)",
             on_retry=_cleanup_partial_clone,
+            on_line=_on_line,
         )
         if ok2:
             # Either the repo has a different default branch or it's empty.
