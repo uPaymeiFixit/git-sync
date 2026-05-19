@@ -316,9 +316,11 @@ def _handle_event(name: str, platforms: "dict[str, _PlatformState]", payload: di
 
 def _pump_child(
     name: str,
-    stream,
+    proc: subprocess.Popen,
     platforms: "dict[str, _PlatformState]",
 ) -> None:
+    stream = proc.stdout
+    assert stream is not None
     for line in iter(stream.readline, ""):
         if line.startswith(EVENTS_PREFIX):
             raw = line[len(EVENTS_PREFIX):].rstrip("\n")
@@ -331,6 +333,13 @@ def _pump_child(
             # Regular log/output line from the child — prefix it with the
             # platform name so the user can attribute each line.
             _write_log_line(f"[{name}] {line}")
+    # stdout closed — child has exited (or is about to). Mark the platform
+    # exited from here so the live display flips from "discovering…" the
+    # moment a fast-skip child dies, instead of waiting until the main
+    # thread's sequential .wait() loop reaches it.
+    rc = proc.wait()
+    platforms[name].exited = True
+    platforms[name].exit_code = rc
 
 
 # ---- Signal handling ----
@@ -394,7 +403,7 @@ def main() -> int:
             env=env,
         )
         t = threading.Thread(
-            target=_pump_child, args=(name, p.stdout, platforms), daemon=True,
+            target=_pump_child, args=(name, p, platforms), daemon=True,
         )
         t.start()
         procs.append((name, p))
@@ -411,12 +420,13 @@ def main() -> int:
     display.start()
 
     try:
-        for name, p in procs:
-            p.wait()
-            platforms[name].exited = True
-            platforms[name].exit_code = p.returncode
+        # Each pump thread waits on its own child (in _pump_child after EOF)
+        # and sets exited/exit_code on the platform state. Waiting on the pumps
+        # therefore waits on every child to actually exit — and a fast-exiting
+        # child's status flips in the display the moment it dies, not when
+        # the loop happens to get around to it.
         for t in pumps:
-            t.join(timeout=2)
+            t.join()
     finally:
         display.stop()
 
