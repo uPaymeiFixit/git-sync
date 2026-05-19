@@ -77,20 +77,31 @@ _log_lock = threading.Lock()
 _display_lines = 0
 
 
+_active_display: "_ParentDisplay | None" = None
+
+
 def _erase_display_locked() -> None:
     global _display_lines
     if _display_lines > 0 and _TTY:
         sys.stderr.write(f"\033[{_display_lines}A\033[J")
-        sys.stderr.flush()
         _display_lines = 0
 
 
 def _write_log_line(line: str) -> None:
+    """Print a log line above the live block.
+
+    Erase block → write line → immediately redraw block, all under one lock
+    and one flush. Without the synchronous redraw the next ~250ms tick would
+    leave the screen blank where the block used to be, producing the flicker
+    the user sees when many log lines arrive in bursts.
+    """
     with _log_lock:
         _erase_display_locked()
         sys.stderr.write(line)
         if not line.endswith("\n"):
             sys.stderr.write("\n")
+        if _active_display is not None:
+            _active_display._redraw_locked()
         sys.stderr.flush()
 
 
@@ -151,16 +162,23 @@ class _ParentDisplay:
             self._stop.wait(self.RENDER_INTERVAL)
 
     def _render(self) -> None:
-        lines = self._format_lines()
         with _log_lock:
-            global _display_lines
             _erase_display_locked()
-            if not lines:
-                return
-            sys.stderr.write("\n".join(lines))
-            sys.stderr.write("\n")
+            self._redraw_locked()
             sys.stderr.flush()
-            _display_lines = len(lines)
+
+    def _redraw_locked(self) -> None:
+        """Write the block at the cursor. Caller holds _log_lock and has
+        already erased any previous block above the cursor."""
+        if not _TTY:
+            return
+        global _display_lines
+        lines = self._format_lines()
+        if not lines:
+            return
+        sys.stderr.write("\n".join(lines))
+        sys.stderr.write("\n")
+        _display_lines = len(lines)
 
     def _format_lines(self) -> list[str]:
         width = shutil.get_terminal_size((100, 24)).columns
@@ -324,6 +342,8 @@ def main() -> int:
         pumps.append(t)
 
     display = _ParentDisplay(platforms)
+    global _active_display
+    _active_display = display
     display.start()
 
     try:

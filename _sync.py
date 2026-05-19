@@ -574,7 +574,12 @@ def run_with_retry(
         if ok:
             return True, output
         if attempt < attempts:
-            log_warn(f"{description}: attempt {attempt} failed; retrying in {delay:.0f}s")
+            # Suppress per-attempt warnings when running under sync-all: the
+            # parent's live block already shows the worker is still alive,
+            # and three platforms x 16 workers x N retries = a flood of
+            # near-identical lines that scroll the useful logs off-screen.
+            if not _EVENTS_ENABLED:
+                log_warn(f"{description}: attempt {attempt} failed; retrying in {delay:.0f}s")
             time.sleep(delay)
             delay *= 2
     return False, output
