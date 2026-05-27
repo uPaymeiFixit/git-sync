@@ -19,6 +19,7 @@ from _sync import (  # noqa: E402
 
 GITLAB_HOST = os.environ.get("GITLAB_HOST")
 PLATFORM_ROOT = SYNC_ROOT / "Gitlab"
+INCLUDE_ARCHIVED = bool(os.environ.get("GIT_SYNC_INCLUDE_ARCHIVED"))
 
 
 class CredsNotConfigured(RuntimeError):
@@ -133,49 +134,41 @@ def main() -> int:
         log_error(str(e))
         return 1
 
-    log_info(f"Listing top-level groups on {GITLAB_HOST}...")
+    archived_qs = "" if INCLUDE_ARCHIVED else "&archived=false"
+    archived_msg = " (including archived)" if INCLUDE_ARCHIVED else ""
+    log_info(f"Listing projects visible to your token on {GITLAB_HOST}{archived_msg}...")
+    discovery_errors = 0
     try:
-        groups = glab_api("groups?top_level_only=true&per_page=100")
+        projects = glab_api(
+            f"projects?min_access_level=10{archived_qs}&simple=true&per_page=100"
+        )
     except (RuntimeError, json.JSONDecodeError) as e:
         log_error(str(e))
         return 1
 
-    if not groups:
-        log_error("No top-level groups visible. Are you a member of any?")
+    if not projects:
+        log_error("No projects visible. Are you a member of any?")
         return 1
-
-    log_info(f"Walking {len(groups)} top-level group(s) for non-archived projects...")
 
     seen: set[str] = set()
     jobs: list[Job] = []
     skipped: list[Outcome] = []
-    discovery_errors = 0
-    for group in groups:
-        gid = group["id"]
-        try:
-            projects = glab_api(
-                f"groups/{gid}/projects?include_subgroups=true&archived=false&per_page=100"
-            )
-        except (RuntimeError, json.JSONDecodeError) as e:
-            log_error(f"list projects in group {gid}: {e}")
-            discovery_errors += 1
+    for p in projects:
+        branch = p.get("default_branch")
+        if not branch:
             continue
-        for p in projects:
-            branch = p.get("default_branch")
-            if not branch:
-                continue
-            url = p.get("ssh_url_to_repo")
-            path_ns = p.get("path_with_namespace")
-            if not url or not path_ns:
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            dest = PLATFORM_ROOT / path_ns
-            if matches_skip(path_ns):
-                skipped.append(Outcome(rel=_rel(dest), status=Status.SKIPPED, url=url))
-                continue
-            jobs.append(Job(ssh_url=url, dest=dest, branch=branch))
+        url = p.get("ssh_url_to_repo")
+        path_ns = p.get("path_with_namespace")
+        if not url or not path_ns:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        dest = PLATFORM_ROOT / path_ns
+        if matches_skip(path_ns):
+            skipped.append(Outcome(rel=_rel(dest), status=Status.SKIPPED, url=url))
+            continue
+        jobs.append(Job(ssh_url=url, dest=dest, branch=branch))
 
     if not jobs and not skipped:
         log_warn("No projects found. Nothing to do.")

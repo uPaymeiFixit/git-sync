@@ -37,6 +37,11 @@ export GIT_SYNC_GITHUB_ORG=your-github-org
 # export GIT_SYNC_SKIP_GITLAB=1
 # export GIT_SYNC_SKIP_GITHUB=1
 
+# OPTIONAL. Also sync archived repos. Default off. Affects GitLab (server-side
+# filter) and GitHub (client-side filter); has no effect on Bitbucket, which
+# doesn't expose archive state in its repo listing.
+# export GIT_SYNC_INCLUDE_ARCHIVED=1
+
 # OPTIONAL. Bitbucket credentials via env vars instead of ~/.netrc. The app
 # password needs the read:repository:bitbucket scope. Create one at:
 # https://bitbucket.org/account/settings/app-passwords/

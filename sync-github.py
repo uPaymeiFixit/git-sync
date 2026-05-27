@@ -26,6 +26,7 @@ ORG = os.environ.get("GIT_SYNC_GITHUB_ORG")
 DEST_ROOT = SYNC_ROOT / "Github"
 API = "https://api.github.com"
 NETRC_HOST = "api.github.com"
+INCLUDE_ARCHIVED = bool(os.environ.get("GIT_SYNC_INCLUDE_ARCHIVED"))
 
 
 class CredsNotConfigured(RuntimeError):
@@ -200,10 +201,7 @@ def main() -> int:
             log_error(f"fetch page {page_num}: {e}")
             return 1
         for v in page:
-            # Skip archived repos to match GitLab behavior (we filter
-            # ?archived=false there). GitHub doesn't have a server-side
-            # filter for this on the org-repos endpoint.
-            if v.get("archived"):
+            if v.get("archived") and not INCLUDE_ARCHIVED:
                 continue
             branch = v.get("default_branch")
             if not branch:

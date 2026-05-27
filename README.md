@@ -43,6 +43,7 @@ All configuration is via environment variables. See [.envrc.example](.envrc.exam
 | `GITLAB_HOST` | Only if syncing GitLab |
 | `GIT_SYNC_GITHUB_ORG` | Only if syncing GitHub |
 | `GIT_SYNC_SKIP` | Optional |
+| `GIT_SYNC_INCLUDE_ARCHIVED` | Optional (set to any non-empty value to also sync archived repos; affects GitLab + GitHub, no effect on Bitbucket) |
 | `GIT_SYNC_SKIP_BITBUCKET`, `GIT_SYNC_SKIP_GITLAB`, `GIT_SYNC_SKIP_GITHUB` | Optional (set to any non-empty value to skip that platform even when configured) |
 | `GIT_SYNC_BITBUCKET_USER`, `GIT_SYNC_BITBUCKET_APP_PASSWORD` | Optional (alternative to `~/.netrc`) |
 | `GIT_SYNC_GITHUB_TOKEN` | Optional (alternative to `~/.netrc`) |
