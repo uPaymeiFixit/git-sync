@@ -58,6 +58,10 @@ struct MenuContent: View {
         }
         .keyboardShortcut(",", modifiers: .command)
 
+        Button("Check for updates…") {
+            Task { await UpdateChecker.check() }
+        }
+
         Toggle("Launch at login", isOn: $launchAtLogin)
             .onChange(of: launchAtLogin) { _, newValue in
                 _ = LaunchAtLogin.setEnabled(newValue)
