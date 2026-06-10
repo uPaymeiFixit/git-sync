@@ -39,8 +39,12 @@ final class AppState: ObservableObject {
     }
 
     var menuBarIconName: String {
-        if isRunning { return "arrow.triangle.2.circlepath" }
-        if showsAttention { return "exclamationmark.triangle" }
+        // - running: arrow circling (animated via symbol effect at the view)
+        // - attention: warning triangle so the user notices something needs
+        //   their attention without having to open the menu
+        // - idle: plain arrow circle
+        if isRunning      { return "arrow.triangle.2.circlepath" }
+        if showsAttention { return "exclamationmark.triangle.fill" }
         return "arrow.triangle.2.circlepath"
     }
 

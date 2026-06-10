@@ -33,9 +33,14 @@ struct GitSyncMenuBarApp: App {
                 .environmentObject(state)
                 .environmentObject(settings)
                 .environmentObject(history)
-                .onAppear { _ = state.scheduler }   // ensure scheduler is built
+                .onAppear {
+                    _ = state.scheduler   // ensure scheduler is built
+                    installTerminationGuard()
+                }
         } label: {
-            Label("git-sync", systemImage: state.menuBarIconName)
+            Image(systemName: state.menuBarIconName)
+                .symbolEffect(.pulse, options: .repeating, isActive: state.isRunning)
+                .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
         }
         .menuBarExtraStyle(.menu)
 
@@ -53,5 +58,18 @@ struct GitSyncMenuBarApp: App {
                 .environmentObject(history)
         }
         .windowResizability(.contentSize)
+    }
+
+    // Quit-while-running cleanup. Without this, the .app's process exits
+    // and macOS reaps the Python children with SIGTERM — usually fine, but
+    // a child mid-clone can leave a .git/*.lock behind. We send a polite
+    // SIGTERM ourselves so the scripts' own SIGINT handler runs first.
+    private func installTerminationGuard() {
+        let appState = state
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in appState.cancelRun() }
+        }
     }
 }

@@ -17,10 +17,24 @@ struct MenuContent: View {
                 }
             }
         } else if let last = state.lastRun {
-            Text("Last run: \(last.startedAt.formatted(.relative(presentation: .named)))")
-            if state.anomalyCount > 0 {
+            let when = last.startedAt.formatted(.relative(presentation: .named))
+            let spawnFailures = last.exitCodes.values.filter { $0 < 0 }.count
+            if spawnFailures > 0 {
+                Text("Last run \(when) — \(spawnFailures) platform(s) failed to start")
+                Text("Check Settings → Paths")
+                    .foregroundStyle(.secondary)
+            } else if state.anomalyCount > 0 {
+                Text("Last run \(when) — \(state.anomalyCount) anomaly/anomalies")
                 Divider()
                 AnomaliesSubmenu(outcomes: last.outcomes)
+            } else if last.exitCodes.values.allSatisfy({ $0 == 2 }) {
+                // Every platform exited EXIT_SKIPPED — usually means no
+                // credentials are configured yet.
+                Text("Last run \(when) — all platforms skipped")
+                Text("Configure credentials in Settings")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Last run \(when) — all clean")
             }
         } else {
             Text("No runs yet")
