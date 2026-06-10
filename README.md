@@ -59,10 +59,10 @@ Quickest setup: `cp .envrc.example .envrc`, edit values, then either `direnv all
 From inside the repo:
 
 ```
-./sync-all.py        # all configured platforms
-./sync-bitbucket.py
-./sync-gitlab.py
-./sync-github.py
+./scripts/sync-all.py        # all configured platforms
+./scripts/sync-bitbucket.py
+./scripts/sync-gitlab.py
+./scripts/sync-github.py
 ```
 
 Or invoke by full path from anywhere — cwd doesn't matter, the scripts use `GIT_SYNC_ROOT` for paths.
@@ -88,7 +88,7 @@ Skipped repos are listed in the summary so you know they exist; their on-disk st
 Cron runs with a minimal environment, so set the vars inline. Example: sync once a day at 3 AM, log to a file.
 
 ```
-0 3 * * * GIT_SYNC_ROOT=$HOME/git/synced GIT_SYNC_BITBUCKET_WORKSPACE=my-workspace GITLAB_HOST=gitlab.example.com $HOME/git/git-sync/sync-all.py >> $HOME/.git-sync.log 2>&1
+0 3 * * * GIT_SYNC_ROOT=$HOME/git/synced GIT_SYNC_BITBUCKET_WORKSPACE=my-workspace GITLAB_HOST=gitlab.example.com $HOME/git/git-sync/scripts/sync-all.py >> $HOME/.git-sync.log 2>&1
 ```
 
 Adjust `$HOME/git/git-sync/` to wherever you cloned this repo.
