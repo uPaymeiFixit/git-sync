@@ -3,7 +3,6 @@ import SwiftUI
 struct MenuContent: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.openWindow) private var openWindow
-    @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
 
     var body: some View {
         if state.isRunning {
@@ -17,25 +16,7 @@ struct MenuContent: View {
                 }
             }
         } else if let last = state.lastRun {
-            let when = last.startedAt.formatted(.relative(presentation: .named))
-            let spawnFailures = last.exitCodes.values.filter { $0 < 0 }.count
-            if spawnFailures > 0 {
-                Text("Last run \(when) — \(spawnFailures) platform(s) failed to start")
-                Text("Check Settings → Paths")
-                    .foregroundStyle(.secondary)
-            } else if state.anomalyCount > 0 {
-                Text("Last run \(when) — \(state.anomalyCount) anomaly/anomalies")
-                Divider()
-                AnomaliesSubmenu(outcomes: last.outcomes)
-            } else if last.exitCodes.values.allSatisfy({ $0 == 2 }) {
-                // Every platform exited EXIT_SKIPPED — usually means no
-                // credentials are configured yet.
-                Text("Last run \(when) — all platforms skipped")
-                Text("Configure credentials in Settings")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Last run \(when) — all clean")
-            }
+            LastRunSummary(run: last, anomalyCount: state.anomalyCount)
         } else {
             Text("No runs yet")
         }
@@ -64,6 +45,7 @@ struct MenuContent: View {
 
         Button("Show history…") {
             openWindow(id: "history")
+            activateAppToFront()
         }
         .keyboardShortcut("h", modifiers: .command)
 
@@ -71,26 +53,64 @@ struct MenuContent: View {
             Text("Settings…")
         }
         .keyboardShortcut(",", modifiers: .command)
+        .simultaneousGesture(TapGesture().onEnded {
+            // Nudge focus to the freshly-opened Settings window. SettingsLink
+            // itself doesn't activate the app, so the window opens behind
+            // whatever the user previously had in front.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                activateAppToFront()
+            }
+        })
 
         Button("Check for updates…") {
             Task { await UpdateChecker.check() }
         }
 
-        Toggle("Launch at login", isOn: $launchAtLogin)
-            .onChange(of: launchAtLogin) { _, newValue in
-                _ = LaunchAtLogin.setEnabled(newValue)
-                // Re-read the system state in case registration failed.
-                launchAtLogin = LaunchAtLogin.isEnabled
-            }
-
         Divider()
 
-        Button("Quit") {
+        Button("Quit GitSync") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q", modifiers: .command)
     }
+}
 
+// Pulled out so the dispatcher can return ONE View — SwiftUI ViewBuilders
+// don't compose if/else-if/else chains nicely as inline @ViewBuilder
+// computed properties inside a parent body that has other siblings.
+private struct LastRunSummary: View {
+    let run: RunRecord
+    let anomalyCount: Int
+
+    var body: some View {
+        let when = run.startedAt.formatted(.relative(presentation: .named))
+        let exits = Array(run.exitCodes.values)
+        let spawnFailures = exits.filter { $0 < 0 }.count
+        let nonZero = exits.filter { $0 != 0 && $0 != 2 }.count
+        let allSkipped = !exits.isEmpty && exits.allSatisfy { $0 == 2 }
+
+        if spawnFailures > 0 {
+            Text("Last run \(when) — \(spawnFailures) platform(s) failed to start")
+            Text("Check that the bundled scripts are present.")
+                .foregroundStyle(.secondary)
+        } else if anomalyCount > 0 {
+            Text("Last run \(when) — \(anomalyCount) anomaly/anomalies")
+            Divider()
+            AnomaliesSubmenu(outcomes: run.outcomes)
+        } else if nonZero > 0 && run.outcomes.isEmpty {
+            // Some platforms exited non-zero with no outcomes — almost
+            // always missing config (no host / org / workspace).
+            Text("Last run \(when) — \(nonZero) platform(s) errored")
+            Text("Configure credentials in Settings → Platforms.")
+                .foregroundStyle(.secondary)
+        } else if allSkipped {
+            Text("Last run \(when) — all platforms skipped")
+            Text("Configure credentials in Settings → Platforms.")
+                .foregroundStyle(.secondary)
+        } else {
+            Text("Last run \(when) — all clean")
+        }
+    }
 }
 
 // One submenu per non-optimal status, each containing the actual repos
@@ -123,9 +143,13 @@ private struct AnomaliesSubmenu: View {
         if FileManager.default.fileExists(atPath: target.path) {
             NSWorkspace.shared.activateFileViewerSelecting([target])
         } else {
-            // Stale-on-disk repos may have been deleted between scans;
-            // fall back to opening the platform root.
             NSWorkspace.shared.open(root)
         }
     }
+}
+
+@MainActor
+private func activateAppToFront() {
+    NSApp.activate(ignoringOtherApps: true)
+    NSApp.windows.filter { $0.isVisible }.forEach { $0.orderFrontRegardless() }
 }

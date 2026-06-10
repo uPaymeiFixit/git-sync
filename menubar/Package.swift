@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "GitSyncMenuBar",
+    name: "GitSync",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "GitSyncMenuBar",
-            path: "Sources/GitSyncMenuBar",
+            name: "GitSync",
+            path: "Sources/GitSync",
             exclude: ["Resources"]
         ),
         // Tests are intentionally omitted: this project builds with the

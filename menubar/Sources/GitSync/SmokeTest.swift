@@ -3,13 +3,13 @@ import Foundation
 // CLI smoke test for SyncRunner. Spawns the three platform scripts with
 // every platform skipped (so they exit quickly with EXIT_SKIPPED=2 and
 // emit no real events), then reports what it observed. Catches:
-// - Wrong scripts directory (the SyncSettings.default path)
+// - Wrong scripts directory (the bundled-scripts resolver)
 // - Python interpreter unreachable
 // - Pipe / process plumbing broken
 // - Termination handler not firing
 //
 // Invoked via:
-//   .build/debug/GitSyncMenuBar.app/Contents/MacOS/GitSyncMenuBar --smoke-test
+//   .build/<config>/GitSync.app/Contents/MacOS/GitSync --smoke-test
 enum SmokeTest {
     static func run() -> Int32 {
         let runner = SyncRunner(settings: settingsForSmokeTest())
@@ -43,14 +43,16 @@ enum SmokeTest {
     }
 
     private static func settingsForSmokeTest() -> SyncSettings {
-        var s = SyncSettings.default
-        s.environment = [
-            "GIT_SYNC_ROOT": "/tmp/gitsync-smoketest",
-            "GIT_SYNC_SKIP_BITBUCKET": "1",
-            "GIT_SYNC_SKIP_GITLAB": "1",
-            "GIT_SYNC_SKIP_GITHUB": "1",
-        ]
-        return s
+        SyncSettings(
+            pythonPath: SyncSettings.bundledPythonPath,
+            scriptsDirectory: SyncSettings.bundledScriptsDirectory,
+            environment: [
+                "GIT_SYNC_ROOT": "/tmp/gitsync-smoketest",
+                "GIT_SYNC_SKIP_BITBUCKET": "1",
+                "GIT_SYNC_SKIP_GITLAB": "1",
+                "GIT_SYNC_SKIP_GITHUB": "1",
+            ]
+        )
     }
 }
 

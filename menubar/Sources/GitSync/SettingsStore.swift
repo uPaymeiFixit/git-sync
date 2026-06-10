@@ -8,15 +8,17 @@ import SwiftUI
 // SettingsStore is the single source of truth for the env vars that get
 // passed to the child sync scripts. AppState calls `currentSyncSettings`
 // at the start of each run to build the env dict.
+//
+// Note: the scripts directory and Python interpreter path are NOT user-
+// settable — they're baked into the app bundle (and `/usr/bin/python3`
+// is required on macOS 14+). Users don't manage their own copy of the
+// sync engine, the same way iMovie users don't manage ffmpeg.
 
 @MainActor
 final class SettingsStore: ObservableObject {
     // ---- Persistence keys ---------------------------------------------
-    // UserDefaults keys
     private enum DKey {
         static let syncRoot               = "syncRoot"
-        static let scriptsDirectory       = "scriptsDirectory"
-        static let pythonPath             = "pythonPath"
         static let gitlabHost             = "gitlabHost"
         static let githubOrg              = "githubOrg"
         static let bitbucketWorkspace     = "bitbucketWorkspace"
@@ -34,7 +36,6 @@ final class SettingsStore: ObservableObject {
         static let scheduleDailyHour      = "scheduleDailyHour"
         static let scheduleDailyMinute    = "scheduleDailyMinute"
     }
-    // Keychain account names
     private enum KKey {
         static let githubToken         = "github_token"
         static let bitbucketPassword   = "bitbucket_app_password"
@@ -43,12 +44,6 @@ final class SettingsStore: ObservableObject {
     // ---- UserDefaults-backed scalars (auto-publishing) ----------------
     @Published var syncRoot: String {
         didSet { UserDefaults.standard.set(syncRoot, forKey: DKey.syncRoot) }
-    }
-    @Published var scriptsDirectory: String {
-        didSet { UserDefaults.standard.set(scriptsDirectory, forKey: DKey.scriptsDirectory) }
-    }
-    @Published var pythonPath: String {
-        didSet { UserDefaults.standard.set(pythonPath, forKey: DKey.pythonPath) }
     }
     @Published var gitlabHost: String {
         didSet { UserDefaults.standard.set(gitlabHost, forKey: DKey.gitlabHost) }
@@ -114,10 +109,9 @@ final class SettingsStore: ObservableObject {
         let d = UserDefaults.standard
         let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-        self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git/Paciolan"
-        self.scriptsDirectory   = d.string(forKey: DKey.scriptsDirectory)
-            ?? "\(home)/git/uPaymeiFixit/git-sync/scripts"
-        self.pythonPath         = d.string(forKey: DKey.pythonPath) ?? "/usr/bin/python3"
+        // Default matches .envrc.example. Will obviously be wrong for any
+        // real user — the Settings window surfaces this prominently.
+        self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git/synced"
         self.gitlabHost         = d.string(forKey: DKey.gitlabHost) ?? ""
         self.githubOrg          = d.string(forKey: DKey.githubOrg) ?? ""
         self.bitbucketWorkspace = d.string(forKey: DKey.bitbucketWorkspace) ?? ""
@@ -139,7 +133,9 @@ final class SettingsStore: ObservableObject {
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""
     }
 
-    // Build the SyncSettings value that SyncRunner consumes.
+    // Build the SyncSettings value that SyncRunner consumes. Scripts
+    // directory + Python interpreter are app-bundle-relative and not
+    // user-controllable.
     var currentSyncSettings: SyncSettings {
         var env: [String: String] = [
             "GIT_SYNC_ROOT": syncRoot,
@@ -159,8 +155,8 @@ final class SettingsStore: ObservableObject {
         env["GIT_SYNC_TIMEOUT"] = String(timeout)
         env["GIT_SYNC_DEPTH"] = String(depth)
         return SyncSettings(
-            pythonPath: pythonPath,
-            scriptsDirectory: URL(fileURLWithPath: scriptsDirectory),
+            pythonPath: SyncSettings.bundledPythonPath,
+            scriptsDirectory: SyncSettings.bundledScriptsDirectory,
             environment: env
         )
     }

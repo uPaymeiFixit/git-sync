@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct GitSyncMenuBarApp: App {
+struct GitSyncApp: App {
     @StateObject private var settings: SettingsStore
     @StateObject private var history: HistoryStore
     @StateObject private var state: AppState

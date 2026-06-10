@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>GitSyncMenuBar</string>
+    <string>GitSync</string>
     <key>CFBundleDisplayName</key>
-    <string>git-sync</string>
+    <string>GitSync</string>
     <key>CFBundleExecutable</key>
-    <string>GitSyncMenuBar</string>
+    <string>GitSync</string>
     <key>CFBundleIdentifier</key>
-    <string>com.uPaymeiFixit.GitSyncMenuBar</string>
+    <string>com.uPaymeiFixit.GitSync</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundlePackageType</key>
@@ -23,7 +23,7 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>git-sync menu-bar app</string>
+    <string>GitSync — sync many git repos at once</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

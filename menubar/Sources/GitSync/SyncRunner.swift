@@ -30,7 +30,7 @@ actor SyncRunner {
     private weak var delegate: SyncRunnerDelegate?
     private var settings: SyncSettings
 
-    init(settings: SyncSettings = .default) {
+    init(settings: SyncSettings) {
         self.settings = settings
     }
 

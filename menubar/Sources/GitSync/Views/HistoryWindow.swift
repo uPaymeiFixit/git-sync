@@ -26,6 +26,12 @@ struct HistoryWindow: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+        .onAppear {
+            // Auto-select the newest run so opening the window goes straight
+            // to useful content instead of the "Select a run" placeholder.
+            if selected == nil { selected = history.runs.first?.id }
+            bringWindowToFront()
+        }
     }
 }
 
@@ -62,45 +68,81 @@ private struct RunRow: View {
     }
 }
 
+// Stable layout: header at top, outcomes table (or placeholder) in the
+// middle, log pinned to the bottom with its own reserved height. Avoids
+// the prior DisclosureGroup-in-VStack trap where the placeholder
+// ContentUnavailableView swallowed all the spare vertical space and the
+// disclosure had nowhere to expand into.
 private struct RunDetail: View {
     let run: RunRecord
+    @State private var showLog: Bool = true
 
     var body: some View {
-        VStack(alignment: .leading) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             Divider()
-            Group {
-                if run.outcomes.isEmpty {
-                    ContentUnavailableView(
-                        "No outcomes recorded",
-                        systemImage: "tray",
-                        description: Text("This run didn't produce any outcome events."))
-                } else {
-                    Table(run.outcomes) {
-                        TableColumn("Status") { o in
-                            Label(o.status.displayName, systemImage: o.status.sfSymbol)
-                                .foregroundStyle(o.status.isAnomaly ? .orange : .primary)
-                        }
-                        .width(min: 130, ideal: 150)
-                        TableColumn("Repo") { o in Text(o.rel).font(.system(.body, design: .monospaced)) }
-                        TableColumn("Detail") { o in Text(o.detail).foregroundStyle(.secondary) }
-                    }
-                }
-            }
+            outcomesSection
             if !run.logLines.isEmpty {
                 Divider()
-                DisclosureGroup("Log (\(run.logLines.count) lines)") {
-                    ScrollView {
-                        Text(run.logLines.joined(separator: "\n"))
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 160)
-                }
+                logSection
             }
         }
         .padding()
+    }
+
+    @ViewBuilder
+    private var outcomesSection: some View {
+        if run.outcomes.isEmpty {
+            VStack(alignment: .center, spacing: 8) {
+                Image(systemName: "tray")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text("No outcomes recorded").font(.headline)
+                Text("This run didn't produce any outcome events. Look at the log below for the script's output.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 24)
+        } else {
+            Table(run.outcomes) {
+                TableColumn("Status") { o in
+                    Label(o.status.displayName, systemImage: o.status.sfSymbol)
+                        .foregroundStyle(o.status.isAnomaly ? .orange : .primary)
+                }
+                .width(min: 130, ideal: 150)
+                TableColumn("Repo") { o in Text(o.rel).font(.system(.body, design: .monospaced)) }
+                TableColumn("Detail") { o in Text(o.detail).foregroundStyle(.secondary) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var logSection: some View {
+        HStack {
+            Button {
+                showLog.toggle()
+            } label: {
+                Label(
+                    "Log (\(run.logLines.count) lines)",
+                    systemImage: showLog ? "chevron.down" : "chevron.right"
+                )
+            }
+            .buttonStyle(.plain)
+            Spacer()
+        }
+        if showLog {
+            ScrollView {
+                Text(run.logLines.joined(separator: "\n"))
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+            }
+            .frame(minHeight: 120, maxHeight: 220)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
     }
 
     private var header: some View {
@@ -123,5 +165,13 @@ private struct RunDetail: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+@MainActor
+private func bringWindowToFront() {
+    DispatchQueue.main.async { @MainActor in
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.filter { $0.isVisible }.forEach { $0.orderFrontRegardless() }
     }
 }
