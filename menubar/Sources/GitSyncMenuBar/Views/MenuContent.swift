@@ -19,12 +19,8 @@ struct MenuContent: View {
         } else if let last = state.lastRun {
             Text("Last run: \(last.startedAt.formatted(.relative(presentation: .named)))")
             if state.anomalyCount > 0 {
-                let counts = anomalyCounts(in: last.outcomes)
                 Divider()
-                Text("Anomalies (\(state.anomalyCount))")
-                ForEach(counts, id: \.status) { entry in
-                    Text("\(entry.status.displayName): \(entry.count)")
-                }
+                AnomaliesSubmenu(outcomes: last.outcomes)
             }
         } else {
             Text("No runs yet")
@@ -77,16 +73,41 @@ struct MenuContent: View {
         .keyboardShortcut("q", modifiers: .command)
     }
 
-    private struct AnomalyEntry: Hashable {
-        let status: SyncStatus
-        let count: Int
-    }
+}
 
-    private func anomalyCounts(in outcomes: [Outcome]) -> [AnomalyEntry] {
+// One submenu per non-optimal status, each containing the actual repos
+// that hit that status. Clicking a repo opens the platform root in
+// Finder with that subdirectory selected (so the user sees it in context
+// rather than having Finder open the leaf directory in isolation).
+private struct AnomaliesSubmenu: View {
+    @EnvironmentObject private var settings: SettingsStore
+    let outcomes: [Outcome]
+
+    var body: some View {
         let anomalies = outcomes.filter(\.status.isAnomaly)
         let grouped = Dictionary(grouping: anomalies, by: \.status)
-        return grouped
-            .map { AnomalyEntry(status: $0.key, count: $0.value.count) }
-            .sorted { $0.status.rawValue < $1.status.rawValue }
+        let sortedStatuses = grouped.keys.sorted { $0.rawValue < $1.rawValue }
+
+        Text("Anomalies (\(anomalies.count))")
+        ForEach(sortedStatuses, id: \.self) { status in
+            let group = grouped[status] ?? []
+            Menu("\(status.displayName) (\(group.count))") {
+                ForEach(group, id: \.id) { outcome in
+                    Button(outcome.rel) { reveal(outcome) }
+                }
+            }
+        }
+    }
+
+    private func reveal(_ outcome: Outcome) {
+        let root = URL(fileURLWithPath: settings.syncRoot)
+        let target = root.appendingPathComponent(outcome.rel)
+        if FileManager.default.fileExists(atPath: target.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([target])
+        } else {
+            // Stale-on-disk repos may have been deleted between scans;
+            // fall back to opening the platform root.
+            NSWorkspace.shared.open(root)
+        }
     }
 }
