@@ -12,11 +12,13 @@ final class AppState: ObservableObject {
     @Published var activeWorkers: [String: [String: WorkerView]] = [:]
 
     private let settingsStore: SettingsStore
+    private let history: HistoryStore
     private(set) lazy var runner: SyncRunner = SyncRunner(settings: settingsStore.currentSyncSettings)
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
 
-    init(settings: SettingsStore) {
+    init(settings: SettingsStore, history: HistoryStore) {
         self.settingsStore = settings
+        self.history = history
     }
 
     // Called by App.swift whenever a schedule-related setting changes,
@@ -98,6 +100,7 @@ extension AppState: SyncRunnerDelegate {
             self.lastRun = run
             self.currentRun = nil
             self.activeWorkers = [:]
+            self.history.record(run)
         }
     }
 

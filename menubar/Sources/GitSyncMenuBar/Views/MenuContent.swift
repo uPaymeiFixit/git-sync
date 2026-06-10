@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuContent: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.openWindow) private var openWindow
     @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
 
     var body: some View {
@@ -50,6 +51,11 @@ struct MenuContent: View {
         }
 
         Divider()
+
+        Button("Show history…") {
+            openWindow(id: "history")
+        }
+        .keyboardShortcut("h", modifiers: .command)
 
         SettingsLink {
             Text("Settings…")
