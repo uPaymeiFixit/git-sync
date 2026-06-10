@@ -151,6 +151,11 @@ class _ParentDisplay:
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
         self._started_at = time.monotonic()
+        # Last-rendered line list; we skip the redraw cycle entirely when the
+        # next frame would be byte-identical to the last one. Tightens the
+        # captured-output stream when sync-all.py runs under a recorder, and
+        # avoids needless erase+redraw flicker on slow terminals.
+        self._last_lines: "list[str] | None" = None
 
     def start(self) -> None:
         if not _TTY:
@@ -175,22 +180,33 @@ class _ParentDisplay:
 
     def _render(self) -> None:
         with _log_lock:
+            lines = self._format_lines()
+            # Skip the redraw cycle when the next frame is byte-identical to
+            # the last one. The clock in the header changes every second so
+            # this won't suppress visible time updates, but it does collapse
+            # the 4x/sec tick rate into ~1x/sec when nothing is happening —
+            # significantly tightens captured/recorded output streams.
+            if lines == self._last_lines:
+                return
             _erase_display_locked()
-            self._redraw_locked()
+            self._redraw_locked(lines)
             sys.stderr.flush()
 
-    def _redraw_locked(self) -> None:
+    def _redraw_locked(self, lines: "list[str] | None" = None) -> None:
         """Write the block at the cursor. Caller holds _log_lock and has
         already erased any previous block above the cursor."""
         if not _TTY:
             return
         global _display_lines
-        lines = self._format_lines()
+        if lines is None:
+            lines = self._format_lines()
         if not lines:
+            self._last_lines = lines
             return
         sys.stderr.write("\n".join(lines))
         sys.stderr.write("\n")
         _display_lines = len(lines)
+        self._last_lines = lines
 
     def _format_lines(self) -> list[str]:
         width = shutil.get_terminal_size((100, 24)).columns

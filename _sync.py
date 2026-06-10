@@ -319,6 +319,11 @@ class _LiveDisplay:
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
         self._started_at = time.monotonic()
+        # Suppress the redraw cycle when the next frame would be byte-identical
+        # to the last one. The header clock changes every second so this still
+        # ticks at ~1Hz, but it collapses the 4x/sec render rate when nothing
+        # else is changing — keeps captured streams tighter.
+        self._last_lines: "list[str] | None" = None
 
     def start(self) -> None:
         if not _TTY:
@@ -344,14 +349,18 @@ class _LiveDisplay:
     def _render(self) -> None:
         lines = self._format_lines()
         with _log_lock:
+            if lines == self._last_lines:
+                return
             global _display_lines
             _erase_display_locked()
             if not lines:
+                self._last_lines = lines
                 return
             sys.stderr.write("\n".join(lines))
             sys.stderr.write("\n")
             sys.stderr.flush()
             _display_lines = len(lines)
+            self._last_lines = lines
 
     def _format_lines(self) -> list[str]:
         width = shutil.get_terminal_size((100, 24)).columns
