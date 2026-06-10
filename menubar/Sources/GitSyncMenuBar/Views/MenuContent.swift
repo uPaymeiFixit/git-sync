@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuContent: View {
     @EnvironmentObject private var state: AppState
+    @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
 
     var body: some View {
         if state.isRunning {
@@ -54,6 +55,13 @@ struct MenuContent: View {
             Text("Settings…")
         }
         .keyboardShortcut(",", modifiers: .command)
+
+        Toggle("Launch at login", isOn: $launchAtLogin)
+            .onChange(of: launchAtLogin) { _, newValue in
+                _ = LaunchAtLogin.setEnabled(newValue)
+                // Re-read the system state in case registration failed.
+                launchAtLogin = LaunchAtLogin.isEnabled
+            }
 
         Divider()
 

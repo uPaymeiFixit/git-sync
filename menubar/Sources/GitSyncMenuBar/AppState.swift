@@ -13,9 +13,16 @@ final class AppState: ObservableObject {
 
     private let settingsStore: SettingsStore
     private(set) lazy var runner: SyncRunner = SyncRunner(settings: settingsStore.currentSyncSettings)
+    private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
 
     init(settings: SettingsStore) {
         self.settingsStore = settings
+    }
+
+    // Called by App.swift whenever a schedule-related setting changes,
+    // so the timer reflects the new mode/interval without an app restart.
+    func rescheduleIfNeeded() {
+        scheduler.reschedule()
     }
 
     var isRunning: Bool { currentRun != nil }

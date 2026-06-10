@@ -28,6 +28,7 @@ struct GitSyncMenuBarApp: App {
             MenuContent()
                 .environmentObject(state)
                 .environmentObject(settings)
+                .onAppear { _ = state.scheduler }   // ensure scheduler is built
         } label: {
             Label("git-sync", systemImage: state.menuBarIconName)
         }
@@ -36,6 +37,10 @@ struct GitSyncMenuBarApp: App {
         Settings {
             SettingsWindow()
                 .environmentObject(settings)
+                .onChange(of: settings.scheduleMode) { _, _ in state.rescheduleIfNeeded() }
+                .onChange(of: settings.scheduleHours) { _, _ in state.rescheduleIfNeeded() }
+                .onChange(of: settings.scheduleDailyHour) { _, _ in state.rescheduleIfNeeded() }
+                .onChange(of: settings.scheduleDailyMinute) { _, _ in state.rescheduleIfNeeded() }
         }
     }
 }
