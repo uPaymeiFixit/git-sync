@@ -44,9 +44,18 @@ The app never modifies `.envrc`. Settings live in UserDefaults + Keychain (for t
 
 ## Testing
 
+This project builds against the Swift toolchain shipped with the Command Line Tools, which does not include XCTest or swift-testing. Instead the parser is exercised at runtime via:
+
 ```
-cd menubar
-swift test
+./build.sh debug
+.build/debug/GitSyncMenuBar.app/Contents/MacOS/GitSyncMenuBar --verify-parser
 ```
 
-The `Tests/GitSyncMenuBarTests/Fixtures/` directory holds captured event streams from real runs (record with `GIT_SYNC_EVENTS=1 python3 ../scripts/sync-gitlab.py > fixture.txt`).
+The fixture lives at [Sources/GitSyncMenuBar/Resources/all-events.txt](Sources/GitSyncMenuBar/Resources/all-events.txt) and is inlined into [Sources/GitSyncMenuBar/VerifyParser.swift](Sources/GitSyncMenuBar/VerifyParser.swift) (so the `.app` doesn't need to ship a resource bundle). To refresh:
+
+```
+python3 synthesize_fixture.py > Sources/GitSyncMenuBar/Resources/all-events.txt
+# then paste the contents into VerifyParser.swift's embeddedFixture
+```
+
+When this project is opened in Xcode later, swap the inlined fixture for a real test target reading `all-events.txt` directly.
