@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -14,7 +16,7 @@ from _sync import (  # noqa: E402
     Job, Outcome, OutcomeCollector, Status,
     _rel, finish_run,
     log_error, log_info, log_ok, log_warn,
-    matches_skip, print_outcome_summary, run_jobs,
+    matches_skip, print_outcome_summary, run_jobs, stop_requested,
 )
 
 GITLAB_HOST = os.environ.get("GITLAB_HOST")
@@ -26,20 +28,65 @@ class CredsNotConfigured(RuntimeError):
     """glab not installed or not authed for this host — skip the platform gracefully."""
 
 
-def _glab_api_single(path: str):
-    """One glab api call. Caller handles pagination."""
-    result = subprocess.run(
-        ["glab", "api", "--hostname", GITLAB_HOST, path],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"glab api {path} failed: {(result.stderr or '').strip()}")
-    return json.loads(result.stdout)
+# Errors we'll retry on. Transient network/VPN blips look like "no route to
+# host", "connection refused", or a 5xx from GitLab itself. Auth errors (401)
+# and "not found" (404) are not transient — fail fast on those.
+_RETRYABLE_PATTERNS = (
+    "no route to host",
+    "connection refused",
+    "connection reset",
+    "i/o timeout",
+    "tls handshake timeout",
+    "EOF",
+    "temporary failure in name resolution",
+    "502",
+    "503",
+    "504",
+)
+
+
+def _is_retryable_glab_error(stderr: str) -> bool:
+    lower = stderr.lower()
+    return any(pat.lower() in lower for pat in _RETRYABLE_PATTERNS)
+
+
+def _glab_api_single(path: str, *, attempts: int = 4, backoff: float = 2.0):
+    """One glab api call, with retry on transient network failures.
+
+    glab itself doesn't retry, so a single dropped TCP connection mid-listing
+    nukes the whole discovery (which then forces a full re-run). We retry on
+    network-shaped error strings with jittered exponential backoff, and fail
+    fast on auth/permission/not-found errors.
+    """
+    delay = backoff
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        if stop_requested():
+            raise RuntimeError("aborted")
+        result = subprocess.run(
+            ["glab", "api", "--hostname", GITLAB_HOST, path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        last_err = (result.stderr or "").strip()
+        if attempt >= attempts or not _is_retryable_glab_error(last_err):
+            raise RuntimeError(f"glab api {path} failed: {last_err}")
+        # Jitter ±50% to spread out retries if anything ever calls this
+        # concurrently for the same transient failure.
+        sleep_for = delay * random.uniform(0.5, 1.5)
+        log_warn(
+            f"glab api {path}: attempt {attempt} failed (transient); "
+            f"retrying in {sleep_for:.0f}s"
+        )
+        time.sleep(sleep_for)
+        delay *= 2
+    raise RuntimeError(f"glab api {path} failed: {last_err}")
 
 
 _PER_PAGE_RE = re.compile(r"[?&]per_page=(\d+)")
