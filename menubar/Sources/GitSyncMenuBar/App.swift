@@ -11,6 +11,9 @@ struct GitSyncMenuBarApp: App {
         if args.contains("--verify-parser") {
             exit(VerifyParser.run())
         }
+        if args.contains("--smoke-test") {
+            exit(SmokeTest.run())
+        }
     }
 
     var body: some Scene {
