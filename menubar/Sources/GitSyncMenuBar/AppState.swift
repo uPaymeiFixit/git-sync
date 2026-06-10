@@ -11,7 +11,12 @@ final class AppState: ObservableObject {
     // current phase + percentage. Empty between runs.
     @Published var activeWorkers: [String: [String: WorkerView]] = [:]
 
-    private(set) lazy var runner: SyncRunner = SyncRunner(settings: .default)
+    private let settingsStore: SettingsStore
+    private(set) lazy var runner: SyncRunner = SyncRunner(settings: settingsStore.currentSyncSettings)
+
+    init(settings: SettingsStore) {
+        self.settingsStore = settings
+    }
 
     var isRunning: Bool { currentRun != nil }
 
@@ -41,7 +46,10 @@ final class AppState: ObservableObject {
         // can appear at the end if this run finds anomalies.
         dismissedRunID = nil
         activeWorkers = [:]
+        // Pick up any settings edits the user made since the last run.
+        let snapshot = settingsStore.currentSyncSettings
         Task {
+            await runner.updateSettings(snapshot)
             await runner.startRun(delegate: self)
         }
     }

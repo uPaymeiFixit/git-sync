@@ -50,6 +50,13 @@ struct MenuContent: View {
 
         Divider()
 
+        SettingsLink {
+            Text("Settings…")
+        }
+        .keyboardShortcut(",", modifiers: .command)
+
+        Divider()
+
         Button("Quit") {
             NSApplication.shared.terminate(nil)
         }
