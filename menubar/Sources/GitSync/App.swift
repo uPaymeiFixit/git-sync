@@ -19,6 +19,9 @@ struct GitSyncApp: App {
         if args.contains("--load-test") {
             exit(LoadTest.run())
         }
+        if args.contains("--pipe-stress-test") {
+            exit(PipeStressTest.run())
+        }
 
         // Order matters: settings + history must exist before AppState so the
         // runner picks up the user's stored settings and the history store

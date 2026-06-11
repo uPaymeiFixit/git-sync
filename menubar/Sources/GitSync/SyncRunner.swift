@@ -110,44 +110,81 @@ actor SyncRunner {
         try process.run()
         processes[platformName] = process
 
-        let buffer = self.buffer
-        Task.detached {
-            await Self.readEvents(from: stdoutPipe, platform: platformName, into: buffer)
-        }
-        Task.detached {
-            await Self.readLog(from: stderrPipe, platform: platformName, into: buffer)
-        }
+        // Drain stdout and stderr via readabilityHandler. We deliberately
+        // avoid FileHandle.AsyncBytes / .lines here: that path stalled on
+        // real high-throughput runs (1500+ repos), apparently because of
+        // a known issue with AsyncBytes' suspend/resume around full kernel
+        // pipe buffers. readabilityHandler is the time-tested callback
+        // API — it fires on a background queue whenever the kernel has
+        // data, and never deadlocks against a full pipe.
+        attach(reader: stdoutPipe.fileHandleForReading,
+               role: .events,
+               platform: platformName)
+        attach(reader: stderrPipe.fileHandleForReading,
+               role: .log,
+               platform: platformName)
     }
 
-    // Drains the platform child's stdout into the buffer. Critical that
-    // this never blocks on UI: each push() only touches the buffer actor.
-    // Coalescing of worker_phase events happens inside the buffer.
-    private static func readEvents(from pipe: Pipe, platform: String, into buffer: EventBuffer) async {
-        let parser = EventParser(platform: platform)
-        do {
-            for try await line in pipe.fileHandleForReading.bytes.lines {
-                switch parser.parse(line) {
-                case .event(let event):
-                    await buffer.push(event)
-                case .logLine(let log) where !log.isEmpty:
-                    await buffer.pushLogLine(log, platform: platform)
-                case .logLine:
-                    continue
+    private enum ReaderRole {
+        case events     // parse GIT_SYNC_EVENTS lines
+        case log        // append free-form stderr lines
+    }
+
+    // Wires a FileHandle's readabilityHandler into a LineSplitter buffer
+    // and hands completed lines to the EventBuffer. Captures the platform
+    // name and buffer reference; no `self` so the closures can outlive
+    // the runner safely (Process.terminationHandler still finalizes).
+    private nonisolated func attach(reader handle: FileHandle, role: ReaderRole, platform: String) {
+        let splitter = LineSplitter()
+        let buffer = self.buffer
+        let parser = role == .events ? EventParser(platform: platform) : nil
+
+        handle.readabilityHandler = { fh in
+            let data = fh.availableData
+            if data.isEmpty {
+                // EOF — child closed this end. Tear down the handler so
+                // it doesn't keep firing with empty data.
+                fh.readabilityHandler = nil
+                // Flush any trailing fragment that didn't end in \n.
+                if let tail = splitter.flushRemainder() {
+                    Task.detached { @Sendable in
+                        await Self.dispatch(line: tail, role: role, platform: platform,
+                                            buffer: buffer, parser: parser)
+                    }
+                }
+                return
+            }
+            let lines = splitter.append(data)
+            guard !lines.isEmpty else { return }
+            Task.detached { @Sendable in
+                for line in lines {
+                    await Self.dispatch(line: line, role: role, platform: platform,
+                                        buffer: buffer, parser: parser)
                 }
             }
-        } catch {
-            await buffer.pushLogLine(
-                "event stream error: \(error)", platform: platform)
         }
     }
 
-    private static func readLog(from pipe: Pipe, platform: String, into buffer: EventBuffer) async {
-        do {
-            for try await line in pipe.fileHandleForReading.bytes.lines {
-                await buffer.pushLogLine(line, platform: platform)
+    private static func dispatch(
+        line: String,
+        role: ReaderRole,
+        platform: String,
+        buffer: EventBuffer,
+        parser: EventParser?
+    ) async {
+        switch role {
+        case .events:
+            guard let parser else { return }
+            switch parser.parse(line) {
+            case .event(let event):
+                await buffer.push(event)
+            case .logLine(let log) where !log.isEmpty:
+                await buffer.pushLogLine(log, platform: platform)
+            case .logLine:
+                break
             }
-        } catch {
-            // stderr pipe closed unexpectedly — fine to ignore.
+        case .log:
+            await buffer.pushLogLine(line, platform: platform)
         }
     }
 
