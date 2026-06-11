@@ -38,6 +38,7 @@ final class SettingsStore: ObservableObject {
     }
     private enum KKey {
         static let githubToken         = "github_token"
+        static let gitlabToken         = "gitlab_token"
         static let bitbucketPassword   = "bitbucket_app_password"
     }
 
@@ -100,6 +101,9 @@ final class SettingsStore: ObservableObject {
     @Published var githubToken: String {
         didSet { Keychain.set(githubToken, for: KKey.githubToken) }
     }
+    @Published var gitlabToken: String {
+        didSet { Keychain.set(gitlabToken, for: KKey.gitlabToken) }
+    }
     @Published var bitbucketAppPassword: String {
         didSet { Keychain.set(bitbucketAppPassword, for: KKey.bitbucketPassword) }
     }
@@ -109,12 +113,12 @@ final class SettingsStore: ObservableObject {
         let d = UserDefaults.standard
         let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-        // Default matches .envrc.example. Will obviously be wrong for any
-        // real user — the Settings window surfaces this prominently.
-        self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git/synced"
-        self.gitlabHost         = d.string(forKey: DKey.gitlabHost) ?? ""
-        self.githubOrg          = d.string(forKey: DKey.githubOrg) ?? ""
-        self.bitbucketWorkspace = d.string(forKey: DKey.bitbucketWorkspace) ?? ""
+        // Paciolan-flavored defaults. The app is primarily for the
+        // Paciolan team's use, so pre-fill what we know.
+        self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git/Paciolan"
+        self.gitlabHost         = d.string(forKey: DKey.gitlabHost) ?? "gitlabdev.paciolan.info"
+        self.githubOrg          = d.string(forKey: DKey.githubOrg) ?? "Paciolan"
+        self.bitbucketWorkspace = d.string(forKey: DKey.bitbucketWorkspace) ?? "paciolan"
         self.bitbucketUser      = d.string(forKey: DKey.bitbucketUser) ?? ""
         self.skipBitbucket      = d.bool(forKey: DKey.skipBitbucket)
         self.skipGitlab         = d.bool(forKey: DKey.skipGitlab)
@@ -130,6 +134,7 @@ final class SettingsStore: ObservableObject {
         self.scheduleDailyHour  = d.object(forKey: DKey.scheduleDailyHour) as? Int ?? 9
         self.scheduleDailyMinute = d.object(forKey: DKey.scheduleDailyMinute) as? Int ?? 0
         self.githubToken        = Keychain.get(KKey.githubToken) ?? ""
+        self.gitlabToken        = Keychain.get(KKey.gitlabToken) ?? ""
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""
     }
 
@@ -146,6 +151,12 @@ final class SettingsStore: ObservableObject {
         if !bitbucketUser.isEmpty         { env["GIT_SYNC_BITBUCKET_USER"] = bitbucketUser }
         if !bitbucketAppPassword.isEmpty  { env["GIT_SYNC_BITBUCKET_APP_PASSWORD"] = bitbucketAppPassword }
         if !githubToken.isEmpty           { env["GIT_SYNC_GITHUB_TOKEN"] = githubToken }
+        // glab reads GITLAB_TOKEN from env when no glab-cli config exists,
+        // so passing this through lets the bundled glab authenticate
+        // without the user running `glab auth login`. If a token isn't
+        // configured, we let glab fall back to its config (the user may
+        // have already authed via the CLI).
+        if !gitlabToken.isEmpty           { env["GITLAB_TOKEN"] = gitlabToken }
         if !skipPatterns.isEmpty          { env["GIT_SYNC_SKIP"] = skipPatterns }
         if skipBitbucket                  { env["GIT_SYNC_SKIP_BITBUCKET"] = "1" }
         if skipGitlab                     { env["GIT_SYNC_SKIP_GITLAB"] = "1" }

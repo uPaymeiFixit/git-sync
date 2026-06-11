@@ -38,6 +38,27 @@ struct SyncSettings: Sendable {
             .deletingLastPathComponent()    // repo root
             .appendingPathComponent("scripts", isDirectory: true)
     }()
+
+    // Bundled-binaries directory. Contains glab (and could host gh, hub,
+    // etc. later). SyncRunner prepends this to the child PATH so the
+    // Python scripts' `glab` lookups find the bundled copy. Dev fallback:
+    // when running from .build/ outside a .app, use menubar/Vendor.
+    static let bundledBinDirectory: URL? = {
+        if let bundled = Bundle.main.resourceURL?
+            .appendingPathComponent("bin", isDirectory: true),
+           FileManager.default.fileExists(atPath: bundled.path) {
+            return bundled
+        }
+        let exec = Bundle.main.executableURL
+            ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        let dev = exec
+            .deletingLastPathComponent()    // .build/<config>/
+            .deletingLastPathComponent()    // .build/
+            .appendingPathComponent("..")
+            .appendingPathComponent("Vendor", isDirectory: true)
+            .standardizedFileURL
+        return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
+    }()
 }
 
 enum Platform: String, CaseIterable, Sendable {

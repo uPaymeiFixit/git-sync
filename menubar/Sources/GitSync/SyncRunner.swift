@@ -179,15 +179,20 @@ actor SyncRunner {
             ?? NSHomeDirectory()
         let user = ProcessInfo.processInfo.environment["USER"]
             ?? NSUserName()
+        // Prepend the bundled bin directory so the Python scripts'
+        // hardcoded `glab` resolves to our bundled copy first. Falls
+        // back to the user's installed glab if the bundled one is
+        // missing.
+        var path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        if let bin = SyncSettings.bundledBinDirectory {
+            path = "\(bin.path):\(path)"
+        }
         return [
             "HOME": home,
             "USER": user,
             "LANG": "en_US.UTF-8",
             "LC_ALL": "en_US.UTF-8",
-            // Standard search path for Homebrew + system bins. If a user
-            // installed glab or gh somewhere else, Settings will add it
-            // to the env (PATH override) in a later commit.
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": path,
             // SSH agent socket — without this, ssh-based clones fail
             // silently in the app even though they work in the user's
             // shell. macOS doesn't propagate this to GUI children
