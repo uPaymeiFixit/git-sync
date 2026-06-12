@@ -4,6 +4,7 @@ import SwiftUI
 struct GitSyncApp: App {
     @StateObject private var settings: SettingsStore
     @StateObject private var history: HistoryStore
+    @StateObject private var inventory: InventoryStore
     @StateObject private var state: AppState
 
     init() {
@@ -23,14 +24,29 @@ struct GitSyncApp: App {
             exit(PipeStressTest.run())
         }
 
-        // Order matters: settings + history must exist before AppState so the
-        // runner picks up the user's stored settings and the history store
-        // can record runs as they finish.
+        // Order matters: settings + history + inventory must exist before
+        // AppState so the runner picks up the user's stored settings, the
+        // history store can record completed runs, and the inventory store
+        // can absorb remote_project + outcome events as they stream in.
         let settingsStore = SettingsStore()
         let historyStore = HistoryStore()
-        _settings = StateObject(wrappedValue: settingsStore)
-        _history  = StateObject(wrappedValue: historyStore)
-        _state    = StateObject(wrappedValue: AppState(settings: settingsStore, history: historyStore))
+        let inventoryStore = InventoryStore()
+        _settings  = StateObject(wrappedValue: settingsStore)
+        _history   = StateObject(wrappedValue: historyStore)
+        _inventory = StateObject(wrappedValue: inventoryStore)
+        _state     = StateObject(wrappedValue: AppState(
+            settings: settingsStore,
+            history: historyStore,
+            inventory: inventoryStore
+        ))
+
+        // Seed the inventory on first launch (best-effort, async).
+        Task { @MainActor in
+            inventoryStore.seedFromHistory(historyStore)
+            let syncRoot = URL(fileURLWithPath:
+                (settingsStore.syncRoot as NSString).expandingTildeInPath)
+            await inventoryStore.seedFromDisk(syncRoot: syncRoot)
+        }
     }
 
     var body: some Scene {
@@ -39,6 +55,7 @@ struct GitSyncApp: App {
                 .environmentObject(state)
                 .environmentObject(settings)
                 .environmentObject(history)
+                .environmentObject(inventory)
                 .onAppear {
                     _ = state.scheduler   // ensure scheduler is built
                     installTerminationGuard()

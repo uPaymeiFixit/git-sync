@@ -13,6 +13,7 @@ final class AppState: ObservableObject {
 
     private let settingsStore: SettingsStore
     private let history: HistoryStore
+    let inventory: InventoryStore
     let eventBuffer = EventBuffer()
     private var drainTimer: Timer?
     private(set) lazy var runner: SyncRunner = SyncRunner(
@@ -21,9 +22,10 @@ final class AppState: ObservableObject {
     )
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
 
-    init(settings: SettingsStore, history: HistoryStore) {
+    init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore) {
         self.settingsStore = settings
         self.history = history
+        self.inventory = inventory
     }
 
     // Called by App.swift whenever a schedule-related setting changes,
@@ -164,10 +166,10 @@ final class AppState: ObservableObject {
             }
         case .outcome(_, let outcome):
             currentRun?.outcomes.append(outcome)
-        case .remoteProject:
-            // No-op until the InventoryStore lands; the event is plumbed
-            // through but nothing consumes it yet.
-            break
+            inventory.apply(outcome: outcome)
+        case .remoteProject(let platform, let rel, let sshURL, let defaultBranch):
+            inventory.apply(remoteProject: platform, rel: rel,
+                            sshURL: sshURL, defaultBranch: defaultBranch)
         }
     }
 }
