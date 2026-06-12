@@ -16,7 +16,7 @@ from _sync import (  # noqa: E402
     Job, Outcome, OutcomeCollector, Status,
     _rel, emit_remote_project, finish_run,
     log_error, log_info, log_ok, log_warn,
-    matches_skip, print_outcome_summary, run_jobs, stop_requested,
+    matches_skip, parse_cli_args, print_outcome_summary, run_jobs, stop_requested,
 )
 
 GITLAB_HOST = os.environ.get("GITLAB_HOST")
@@ -154,6 +154,8 @@ def _check_glab_available() -> None:
 
 
 def main() -> int:
+    cli = parse_cli_args(sys.argv)
+
     if os.environ.get("GIT_SYNC_SKIP_GITLAB"):
         log_info("Skipping GitLab — GIT_SYNC_SKIP_GITLAB is set.")
         return EXIT_SKIPPED
@@ -225,6 +227,23 @@ def main() -> int:
             continue
         jobs.append(Job(ssh_url=url, dest=dest, branch=branch))
 
+    # --list-only: emit remote_project events for the inventory and bail.
+    # No clones, no stale-on-disk scan — purely a discovery refresh.
+    if cli.list_only:
+        log_info(f"--list-only: discovered {len(jobs) + len(skipped)} project(s); exiting without sync.")
+        return EXIT_SKIPPED
+
+    # --only <rel>: filter jobs to a single repo. Discovery still runs
+    # (so the inventory event stream stays accurate); we just narrow the
+    # actual sync to the one repo the user asked for.
+    if cli.only is not None:
+        target = cli.only
+        jobs = [j for j in jobs if _rel(j.dest) == target]
+        skipped = []  # only matters to finish_run's stale-on-disk scan
+        if not jobs:
+            log_warn(f"--only {target}: no matching project in the remote listing.")
+            return 1
+
     if not jobs and not skipped:
         log_warn("No projects found. Nothing to do.")
         return 0
@@ -236,10 +255,12 @@ def main() -> int:
     outcomes = OutcomeCollector(platform="gitlab")
     run_jobs(jobs, outcomes, description="GitLab sync")
 
-    log_info(f"Scanning {PLATFORM_ROOT} for stale and non-git directories...")
+    if cli.only is None:
+        log_info(f"Scanning {PLATFORM_ROOT} for stale and non-git directories...")
     all_outcomes = finish_run(
         PLATFORM_ROOT, jobs, skipped, outcomes,
         discovery_complete=(discovery_errors == 0),
+        skip_stale_scan=(cli.only is not None),
     )
     had_errors = print_outcome_summary(all_outcomes)
     if had_errors or discovery_errors:

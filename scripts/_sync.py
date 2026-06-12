@@ -166,6 +166,45 @@ EVENTS_PREFIX = "\x1eGSE "  # ASCII record-separator + literal "GSE "
 _event_lock = threading.Lock()
 
 
+# ---- CLI args (shared across platform scripts) -----------------------
+#
+# Two optional flags consumed by every sync-{platform}.py:
+#   --list-only       : finish discovery (emit remote_project events),
+#                       then exit EXIT_SKIPPED without doing any clones.
+#                       Used by the menu-bar app to refresh its inventory
+#                       cheaply.
+#   --only <rel>      : after discovery + skip filtering, narrow jobs to
+#                       just the one repo whose rel matches. Used for
+#                       "Sync this repo" actions in the inventory view.
+#
+# Kept simple (no argparse) because each script's main() is short and
+# we want to keep startup cost minimal.
+
+@dataclass
+class CliArgs:
+    list_only: bool = False
+    only: "str | None" = None
+
+
+def parse_cli_args(argv: "list[str]") -> CliArgs:
+    """Parse the shared --list-only / --only <rel> flags. Unknown args
+    are silently ignored to keep back-compat with anything that passes
+    extras to the scripts.
+    """
+    args = CliArgs()
+    i = 0
+    rest = argv[1:]  # skip script path
+    while i < len(rest):
+        token = rest[i]
+        if token == "--list-only":
+            args.list_only = True
+        elif token == "--only" and i + 1 < len(rest):
+            args.only = rest[i + 1]
+            i += 1
+        i += 1
+    return args
+
+
 def _emit_event(kind: str, **fields: object) -> None:
     if not _EVENTS_ENABLED:
         return
@@ -1399,6 +1438,7 @@ def finish_run(
     outcomes: OutcomeCollector,
     *,
     discovery_complete: bool = True,
+    skip_stale_scan: bool = False,
 ) -> list[Outcome]:
     """Combine sync outcomes, skipped repos, and stale/non-git findings.
     Skipped repo destinations count as 'expected' so they aren't flagged as
@@ -1410,11 +1450,18 @@ def finish_run(
     would be flagged as 'deleted upstream' — so we skip the on-disk scan
     entirely and warn loudly. The user should re-run after fixing the
     network issue.
+
+    skip_stale_scan=True is the silent counterpart: the caller knows the
+    full listing was retrieved but is intentionally working on a subset
+    (e.g. --only <rel>), so a stale scan would flag every other repo as
+    deleted. Skip without warning.
     """
     expected = {j.dest for j in jobs}
     for o in skipped:
         expected.add(SYNC_ROOT / o.rel)
-    if discovery_complete:
+    if skip_stale_scan:
+        extras = []
+    elif discovery_complete:
         extras = discover_extras(platform_root, expected)
     else:
         extras = []

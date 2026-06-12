@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sync import (  # noqa: E402
     EXIT_SKIPPED, PARALLEL, SYNC_ROOT,
     Job, Outcome, OutcomeCollector, Status,
-    _rel, emit_remote_project, finish_run,
+    _rel, emit_remote_project, finish_run, parse_cli_args,
     log_error, log_info, log_ok, log_warn,
     matches_skip, print_outcome_summary, run_jobs,
 )
@@ -103,6 +103,8 @@ def http_get_json(url: str, auth_header: str, *, attempts: int = 5, backoff: flo
 
 
 def main() -> int:
+    cli = parse_cli_args(sys.argv)
+
     if os.environ.get("GIT_SYNC_SKIP_BITBUCKET"):
         log_info("Skipping Bitbucket — GIT_SYNC_SKIP_BITBUCKET is set.")
         return EXIT_SKIPPED
@@ -215,6 +217,20 @@ def main() -> int:
             jobs.append(Job(ssh_url=ssh, dest=dest, branch=mb))
         next_url = page.get("next") or ""
 
+    # --list-only: emit remote_project events for the inventory and bail.
+    if cli.list_only:
+        log_info(f"--list-only: discovered {len(jobs) + len(skipped)} repo(s); exiting without sync.")
+        return EXIT_SKIPPED
+
+    # --only <rel>: narrow jobs to the single repo the user asked for.
+    if cli.only is not None:
+        target = cli.only
+        jobs = [j for j in jobs if _rel(j.dest) == target]
+        skipped = []
+        if not jobs:
+            log_warn(f"--only {target}: no matching repo in the remote listing.")
+            return 1
+
     if not jobs and not skipped:
         log_warn(f"No repos found in workspace '{WORKSPACE}'. Nothing to do.")
         return 0
@@ -226,8 +242,12 @@ def main() -> int:
     outcomes = OutcomeCollector(platform="bitbucket")
     run_jobs(jobs, outcomes, description="Bitbucket sync")
 
-    log_info(f"Scanning {platform_root} for stale and non-git directories...")
-    all_outcomes = finish_run(platform_root, jobs, skipped, outcomes)
+    if cli.only is None:
+        log_info(f"Scanning {platform_root} for stale and non-git directories...")
+    all_outcomes = finish_run(
+        platform_root, jobs, skipped, outcomes,
+        skip_stale_scan=(cli.only is not None),
+    )
     had_errors = print_outcome_summary(all_outcomes)
     if had_errors:
         log_warn("Bitbucket sync finished with errors. Re-run to retry.")
