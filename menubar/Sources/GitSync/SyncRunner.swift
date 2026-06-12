@@ -40,7 +40,7 @@ actor SyncRunner {
         guard !isRunning else { return }
         for platform in Platform.allCases {
             do {
-                try spawn(platform: platform)
+                try spawn(platform: platform, extraArgs: [])
                 pending.insert(platform.rawValue)
             } catch {
                 await buffer.pushLogLine(
@@ -53,6 +53,24 @@ actor SyncRunner {
         if pending.isEmpty {
             // Every spawn failed; tell the consumer we're done so the UI
             // doesn't get stuck in "running" forever.
+            await buffer.markAllFinished()
+        }
+    }
+
+    // Kicks off a one-platform run with extra args (used for per-repo
+    // --only <rel> syncs from the Repositories view). No-op if any run
+    // is already in flight; caller should cancel or wait.
+    func runSinglePlatform(platform: Platform, extraArgs: [String]) async {
+        guard !isRunning else { return }
+        do {
+            try spawn(platform: platform, extraArgs: extraArgs)
+            pending.insert(platform.rawValue)
+        } catch {
+            await buffer.pushLogLine(
+                "failed to spawn \(platform.rawValue): \(error)",
+                platform: platform.rawValue
+            )
+            await buffer.pushPlatformFinish(platform.rawValue, exitCode: -1)
             await buffer.markAllFinished()
         }
     }
@@ -75,7 +93,7 @@ actor SyncRunner {
 
     private func snapshotProcesses() -> [String: Process] { processes }
 
-    private func spawn(platform: Platform) throws {
+    private func spawn(platform: Platform, extraArgs: [String]) throws {
         let script = settings.scriptsDirectory.appendingPathComponent(platform.scriptName)
         guard FileManager.default.isReadableFile(atPath: script.path) else {
             throw RunnerError.scriptNotFound(script.path)
@@ -83,7 +101,7 @@ actor SyncRunner {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: settings.pythonPath)
-        process.arguments = [script.path]
+        process.arguments = [script.path] + extraArgs
         process.currentDirectoryURL = settings.scriptsDirectory
 
         var env = baseEnvironment()

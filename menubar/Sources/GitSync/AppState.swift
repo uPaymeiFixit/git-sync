@@ -72,6 +72,24 @@ final class AppState: ObservableObject {
         Task { await runner.cancel() }
     }
 
+    // Per-repo sync triggered from the Repositories view's "Sync this
+    // repo" action. Refuses if a run is already in flight (the menu
+    // disables the action while isRunning is true). Translates the
+    // RepoID into a single-platform spawn with the --only <rel> flag.
+    func syncRepo(_ id: RepoID) {
+        guard !isRunning else { return }
+        guard let platform = Platform(rawValue: id.platform) else { return }
+        currentRun = RunRecord()
+        dismissedRunID = nil
+        activeWorkers = [:]
+        startDrainTimer()
+        let snapshot = settingsStore.currentSyncSettings
+        Task {
+            await runner.updateSettings(snapshot)
+            await runner.runSinglePlatform(platform: platform, extraArgs: ["--only", id.rel])
+        }
+    }
+
     // ---- Drain timer --------------------------------------------------
     //
     // Polls the EventBuffer at ~10Hz on the main actor and applies any
