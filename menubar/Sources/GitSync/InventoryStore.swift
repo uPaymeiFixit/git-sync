@@ -70,7 +70,8 @@ final class InventoryStore: ObservableObject {
         case .cloned, .updated, .updatedDirty, .upToDate, .emptyRemote,
              .dirty, .diverged, .branchMissing:
             repo.isClonedLocally = true
-        case .staleOnDisk, .nonGitDir, .skipped, .error, .notClonedYet:
+        case .staleOnDisk, .nonGitDir, .skipped, .error, .notClonedYet,
+             .notSyncedYet:
             break
         }
         repos[id] = repo
@@ -120,6 +121,68 @@ final class InventoryStore: ObservableObject {
         if let stored = try? decoder.decode([Repo].self, from: data) {
             for repo in stored { repos[repo.id] = repo }
         }
+        migrateLegacyKeys()
+    }
+
+    // The canonical rel format matches the Python's _rel(): relative to
+    // GIT_SYNC_ROOT, INCLUDING the platform directory ("Gitlab/foo/bar").
+    // An early version of the disk walk produced platform-root-relative
+    // rels ("foo/bar"), creating orphan duplicates that never matched
+    // incoming outcomes and showed as eternally not-cloned-yet. Re-key
+    // those and merge into the canonical entry.
+    private func migrateLegacyKeys() {
+        var migrated: [RepoID: Repo] = [:]
+        var changed = false
+        for (id, repo) in repos {
+            let canonical = RepoID(
+                platform: id.platform,
+                rel: Self.canonicalRel(platform: id.platform, rel: id.rel)
+            )
+            if canonical != id { changed = true }
+            if let existing = migrated[canonical] {
+                migrated[canonical] = Self.merge(existing, repo.reKeyed(to: canonical))
+            } else {
+                migrated[canonical] = repo.reKeyed(to: canonical)
+            }
+        }
+        if changed {
+            repos = migrated
+            saveNow()
+        }
+    }
+
+    static func canonicalRel(platform: String, rel: String) -> String {
+        let prefix: String
+        switch platform {
+        case "gitlab":    prefix = "Gitlab/"
+        case "github":    prefix = "Github/"
+        case "bitbucket": prefix = "Bitbucket/"
+        default:          return rel
+        }
+        return rel.hasPrefix(prefix) ? rel : prefix + rel
+    }
+
+    // Merge two records for the same repo: prefer whichever has actual
+    // sync data; union the booleans; keep the latest timestamps and any
+    // non-empty remote-side fields.
+    private static func merge(_ a: Repo, _ b: Repo) -> Repo {
+        let (primary, secondary) = (a.lastStatus == nil && b.lastStatus != nil) ? (b, a) : (a, b)
+        var base = primary
+        base.isClonedLocally = a.isClonedLocally || b.isClonedLocally
+        if base.sshURL.isEmpty { base.sshURL = secondary.sshURL }
+        if base.defaultBranch.isEmpty { base.defaultBranch = secondary.defaultBranch }
+        base.lastSeenRemoteAt = maxDate(a.lastSeenRemoteAt, b.lastSeenRemoteAt)
+        base.lastClonedCheckedAt = maxDate(a.lastClonedCheckedAt, b.lastClonedCheckedAt)
+        return base
+    }
+
+    private static func maxDate(_ x: Date?, _ y: Date?) -> Date? {
+        switch (x, y) {
+        case (nil, nil):            return nil
+        case (let d?, nil):         return d
+        case (nil, let d?):         return d
+        case (let d1?, let d2?):    return max(d1, d2)
+        }
     }
 
     private func scheduleSave() {
@@ -168,9 +231,12 @@ private nonisolated func findClonedRepos(under syncRoot: URL) -> [(platform: Str
             guard isDir else { continue }
             let gitDir = url.appendingPathComponent(".git")
             if fm.fileExists(atPath: gitDir.path) {
-                // Compute rel = path relative to platformRoot.
-                let rel = url.path.dropFirst(platformRoot.path.count + 1)
-                out.append((platform: platform, rel: String(rel)))
+                // Canonical rel format: relative to syncRoot INCLUDING the
+                // platform directory ("Gitlab/foo/bar"), matching the
+                // Python's _rel() so disk-seeded entries share identity
+                // with event-driven ones.
+                let sub = url.path.dropFirst(platformRoot.path.count + 1)
+                out.append((platform: platform, rel: "\(dirName)/\(sub)"))
                 enumerator.skipDescendants()
             }
         }

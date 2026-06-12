@@ -21,13 +21,15 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
     case skipped       = "skipped"
     case error         = "error"
     case notClonedYet  = "not-cloned-yet"   // synthetic; inventory-only
+    case notSyncedYet  = "not-synced-yet"   // synthetic; on disk, no sync data
 
     var isAnomaly: Bool {
         switch self {
         case .updatedDirty, .dirty, .diverged, .branchMissing,
              .staleOnDisk, .nonGitDir, .error:
             return true
-        case .cloned, .updated, .upToDate, .emptyRemote, .skipped, .notClonedYet:
+        case .cloned, .updated, .upToDate, .emptyRemote, .skipped, .notClonedYet,
+             .notSyncedYet:
             return false
         }
     }
@@ -47,6 +49,7 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .skipped:                                   return "minus.circle"
         case .error:                                     return "xmark.octagon"
         case .notClonedYet:                              return "icloud.and.arrow.down"
+        case .notSyncedYet:                              return "circle.dashed"
         }
     }
 
@@ -61,6 +64,7 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .skipped:                        return .secondary
         case .error:                          return .red
         case .notClonedYet:                   return .blue
+        case .notSyncedYet:                   return .gray
         }
     }
 
@@ -81,6 +85,7 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .skipped:       return "Matched a pattern in GIT_SYNC_SKIP."
         case .error:         return "Network, auth, or other failure during sync. See the log for details."
         case .notClonedYet:  return "Remote knows about this repo; it hasn't been cloned locally yet."
+        case .notSyncedYet:  return "Found on disk, but no sync has recorded its status yet. Run a sync to populate it."
         }
     }
 }

@@ -8,6 +8,17 @@ struct RepoID: Hashable, Codable, Sendable, CustomStringConvertible {
     let rel: String
 
     var description: String { "\(platform):\(rel)" }
+
+    // The repo path as the platform knows it — rel minus the leading
+    // platform directory. This is the format GIT_SYNC_SKIP patterns use
+    // (the Python matches them against path_with_namespace / name / slug,
+    // never against the on-disk platform-dir-prefixed path).
+    var namespacePath: String {
+        for prefix in ["Gitlab/", "Github/", "Bitbucket/"] where rel.hasPrefix(prefix) {
+            return String(rel.dropFirst(prefix.count))
+        }
+        return rel
+    }
 }
 
 // One row in the Repositories inventory. The view layer derives all
@@ -34,10 +45,31 @@ struct Repo: Codable, Sendable, Identifiable, Hashable {
 
     var isClonedLocally: Bool
 
-    // Convenience for view layer — returns the synthetic notClonedYet
-    // when no real outcome has been observed.
+    // Convenience for view layer. When no real outcome has been observed:
+    // a repo found on disk is "not synced yet" (we have it, no sync data),
+    // a repo only known from the remote listing is "not cloned yet".
     var effectiveStatus: SyncStatus {
-        lastStatus ?? .notClonedYet
+        if let lastStatus { return lastStatus }
+        return isClonedLocally ? .notSyncedYet : .notClonedYet
+    }
+
+    // Same record under a different identity — used by the inventory's
+    // legacy-key migration.
+    func reKeyed(to newID: RepoID) -> Repo {
+        Repo(
+            id: newID,
+            sshURL: sshURL,
+            defaultBranch: defaultBranch,
+            lastStatus: lastStatus,
+            lastDetail: lastDetail,
+            lastOldSha: lastOldSha,
+            lastNewSha: lastNewSha,
+            lastCommitsAhead: lastCommitsAhead,
+            lastUpdatedAt: lastUpdatedAt,
+            lastSeenRemoteAt: lastSeenRemoteAt,
+            lastClonedCheckedAt: lastClonedCheckedAt,
+            isClonedLocally: isClonedLocally
+        )
     }
 
     init(

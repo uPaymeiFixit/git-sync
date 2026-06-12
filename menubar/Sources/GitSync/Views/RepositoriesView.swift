@@ -16,6 +16,7 @@ struct RepositoriesView: View {
     @State private var enabledStatuses: Set<SyncStatus> = Set(SyncStatus.allCases)
     @State private var enabledPlatforms: Set<String> = ["gitlab", "github", "bitbucket"]
     @State private var collapsedSections: Set<SyncStatus> = []
+    @State private var selection: RepoID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,7 +92,7 @@ struct RepositoriesView: View {
     // MARK: - Repo list
 
     private var repoList: some View {
-        List {
+        List(selection: $selection) {
             ForEach(statusOrder, id: \.self) { status in
                 let group = groupedFiltered[status] ?? []
                 if !group.isEmpty {
@@ -99,6 +100,7 @@ struct RepositoriesView: View {
                         if !collapsedSections.contains(status) {
                             ForEach(group, id: \.id) { repo in
                                 RepoRow(repo: repo)
+                                    .tag(repo.id)
                                     .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
                             }
                         }
@@ -136,14 +138,14 @@ struct RepositoriesView: View {
 
     // MARK: - Filtering + grouping
 
-    // Display order: anomalies first, then unchanged/cloned, then
-    // not-cloned-yet, then skipped/empty.
+    // Display order: anomalies first, then unchanged/cloned, then the
+    // unknowns (on-disk-unsynced, remote-only), then skipped/empty.
     private var statusOrder: [SyncStatus] {
         [
             .error, .dirty, .diverged, .branchMissing, .updatedDirty,
             .staleOnDisk, .nonGitDir,
             .cloned, .updated, .upToDate,
-            .notClonedYet, .emptyRemote, .skipped,
+            .notSyncedYet, .notClonedYet, .emptyRemote, .skipped,
         ]
     }
 
@@ -232,16 +234,36 @@ private struct RepoRow: View {
                 }
             }
             Spacer()
-            Button {
-                reveal()
-            } label: {
-                Image(systemName: "folder")
+            // Row actions. Clicking the row itself only selects it; these
+            // buttons (and the context menu) are how you act on a repo.
+            HStack(spacing: 12) {
+                Button {
+                    state.syncRepo(repo.id)
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.borderless)
+                .help(state.isRunning ? "A sync is already running" : "Sync this repo")
+                .disabled(state.isRunning)
+
+                Button {
+                    addToSkipList()
+                } label: {
+                    Image(systemName: "nosign")
+                }
+                .buttonStyle(.borderless)
+                .help(isInSkipList ? "Already in skip list" : "Add to skip list")
+                .disabled(isInSkipList)
+
+                Button {
+                    reveal()
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(.borderless)
+                .help("Reveal in Finder")
             }
-            .buttonStyle(.plain)
-            .help("Reveal in Finder")
         }
-        .contentShape(Rectangle())
-        .onTapGesture { reveal() }
         .contextMenu {
             Button("Sync this repo") {
                 state.syncRepo(repo.id)
@@ -283,42 +305,37 @@ private struct RepoRow: View {
     }
 
     private func reveal() {
+        // rel is canonical (includes the platform directory, e.g.
+        // "Gitlab/foo/bar"), so the on-disk path is just syncRoot + rel.
         let root = URL(fileURLWithPath:
             (settings.syncRoot as NSString).expandingTildeInPath)
-        let platformDir: String
-        switch repo.id.platform {
-        case "gitlab":    platformDir = "Gitlab"
-        case "github":    platformDir = "Github"
-        case "bitbucket": platformDir = "Bitbucket"
-        default:          platformDir = repo.id.platform.capitalized
-        }
-        let target = root
-            .appendingPathComponent(platformDir, isDirectory: true)
-            .appendingPathComponent(repo.id.rel)
+        let target = root.appendingPathComponent(repo.id.rel)
         if FileManager.default.fileExists(atPath: target.path) {
             NSWorkspace.shared.activateFileViewerSelecting([target])
-        } else {
+        } else if let platformDir = repo.id.rel.split(separator: "/").first {
             // Repo isn't on disk; fall back to opening the platform root
             // so the user can see what is there.
-            NSWorkspace.shared.open(root.appendingPathComponent(platformDir, isDirectory: true))
+            NSWorkspace.shared.open(
+                root.appendingPathComponent(String(platformDir), isDirectory: true))
         }
     }
 
+    // Skip patterns use the platform's namespace path (no "Gitlab/" etc.
+    // prefix) — that's what the Python's matches_skip compares against.
     private var isInSkipList: Bool {
+        let path = repo.id.namespacePath.lowercased()
         let entries = settings.skipPatterns
             .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        return entries.contains { entry in
-            !entry.isEmpty && repo.id.rel.lowercased().hasPrefix(entry.lowercased())
-        }
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        return entries.contains { !$0.isEmpty && path.hasPrefix($0) }
     }
 
     private func addToSkipList() {
         let trimmed = settings.skipPatterns.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            settings.skipPatterns = repo.id.rel
+            settings.skipPatterns = repo.id.namespacePath
         } else {
-            settings.skipPatterns = trimmed + ", " + repo.id.rel
+            settings.skipPatterns = trimmed + ", " + repo.id.namespacePath
         }
     }
 }
