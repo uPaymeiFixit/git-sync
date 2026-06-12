@@ -76,6 +76,14 @@ struct GitSyncApp: App {
                 .onChange(of: settings.scheduleDailyMinute) { _, _ in state.rescheduleIfNeeded() }
         }
 
+        Window("Repositories", id: "repositories") {
+            RepositoriesView()
+                .environmentObject(state)
+                .environmentObject(settings)
+                .environmentObject(inventory)
+        }
+        .windowResizability(.contentSize)
+
         Window("Run history", id: "history") {
             HistoryWindow()
                 .environmentObject(history)

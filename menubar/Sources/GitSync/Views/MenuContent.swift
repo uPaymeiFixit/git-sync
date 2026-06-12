@@ -43,11 +43,17 @@ struct MenuContent: View {
 
         Divider()
 
+        Button("Show repositories…") {
+            openWindow(id: "repositories")
+            activateAppToFront()
+        }
+        .keyboardShortcut("h", modifiers: .command)
+
         Button("Show history…") {
             openWindow(id: "history")
             activateAppToFront()
         }
-        .keyboardShortcut("h", modifiers: .command)
+        .keyboardShortcut("h", modifiers: [.command, .shift])
 
         SettingsLink {
             Text("Settings…")
