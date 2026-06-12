@@ -1,31 +1,29 @@
-# git-sync menu-bar app
+# GitSync menu-bar app
 
-Native macOS menu-bar app for the git-sync scripts. Shows last-run status, surfaces non-optimal repo states (dirty, diverged, stale), lets you trigger runs manually, and runs on a schedule you set.
+Native macOS menu-bar app for the git-sync scripts. Persistent **Repositories** inventory of every repo you have access to, organized by status — at-a-glance: which are diverged, dirty, stale, not-yet-cloned, etc. Click a repo to reveal it in Finder; right-click for per-repo actions (sync this one, add to skip list, copy SSH URL).
 
-## Status
+## Features
 
-Early scaffold. Builds and launches into the menu bar. Most features are stubs — see the implementation plan in `../../.claude/plans/wait-stop-don-t-implement-moonlit-perlis.md` for the roadmap.
+- **Repositories window** (⌘H): live inventory keyed by `(platform, rel)`. Searchable + filterable by status and platform. Survives across runs and app restarts. Status pills with hover tooltips.
+- **Run history** (⇧⌘H): the per-run log view, for when you want the script's stderr from a specific run.
+- **Settings** (⌘,): GIT_SYNC_* env vars + per-platform credentials (Keychain-backed). Bundles `glab` so GitLab works without a separate install.
+- **Schedule**: timer-based, with Launch at Login.
+- **Per-repo sync**: right-click a repo → "Sync this repo" runs the Python with `--only <rel>`.
 
 ## Requirements
 
 - macOS 14+
 - Swift 6 toolchain (ships with Xcode 16 or Command Line Tools 16+)
-- Python 3.9+ on `/usr/bin/python3` or wherever you point the app
+- `/usr/bin/python3` (macOS 14+ ships Python 3.9 there)
 
-## Build
+## Build + install
 
 ```
 cd menubar
-./build.sh           # release build, produces .build/release/GitSyncMenuBar.app
-./build.sh debug     # debug build
-```
-
-Install:
-
-```
-cp -r .build/release/GitSyncMenuBar.app /Applications/
-xattr -d com.apple.quarantine /Applications/GitSyncMenuBar.app   # first launch only
-open /Applications/GitSyncMenuBar.app
+./build.sh release         # produces .build/release/GitSync.app
+cp -r .build/release/GitSync.app /Applications/
+xattr -dr com.apple.quarantine /Applications/GitSync.app   # first launch only
+open /Applications/GitSync.app
 ```
 
 The app uses an ad-hoc code signature. For sharing with others, swap `codesign --sign -` in `build.sh` for a Developer ID Application identity and notarize the bundle.
@@ -33,29 +31,41 @@ The app uses an ad-hoc code signature. For sharing with others, swap `codesign -
 ## Architecture
 
 ```
-GitSyncMenuBar.app
-├── AppState              — observable source of truth
+GitSync.app
+├── AppState              — observable source of truth + event router
 ├── SyncRunner            — spawns scripts/sync-{platform}.py with GIT_SYNC_EVENTS=1
+├── EventBuffer           — batches events; coalesces worker_phase
 ├── EventParser           — consumes the "\x1eGSE " JSON-line protocol
+├── InventoryStore        — persistent repo state keyed by (platform, rel)
+├── HistoryStore          — per-run logs on disk
+├── SettingsStore         — UserDefaults + Keychain
 └── MenuBarExtra UI       — three icon states: idle / running / attention
 ```
 
 The app never modifies `.envrc`. Settings live in UserDefaults + Keychain (for tokens) and are passed to child processes as env vars on each run. `.envrc` remains the source of truth for command-line invocations.
 
-## Testing
+## CLI test harnesses
 
-This project builds against the Swift toolchain shipped with the Command Line Tools, which does not include XCTest or swift-testing. Instead the parser is exercised at runtime via:
-
-```
-./build.sh debug
-.build/debug/GitSyncMenuBar.app/Contents/MacOS/GitSyncMenuBar --verify-parser
-```
-
-The fixture lives at [Sources/GitSyncMenuBar/Resources/all-events.txt](Sources/GitSyncMenuBar/Resources/all-events.txt) and is inlined into [Sources/GitSyncMenuBar/VerifyParser.swift](Sources/GitSyncMenuBar/VerifyParser.swift) (so the `.app` doesn't need to ship a resource bundle). To refresh:
+The app's executable has four diagnostic modes:
 
 ```
-python3 synthesize_fixture.py > Sources/GitSyncMenuBar/Resources/all-events.txt
-# then paste the contents into VerifyParser.swift's embeddedFixture
+.build/.../GitSync.app/Contents/MacOS/GitSync --verify-parser     # EventParser
+.build/.../GitSync.app/Contents/MacOS/GitSync --smoke-test        # spawn + skip
+.build/.../GitSync.app/Contents/MacOS/GitSync --load-test         # EventBuffer
+.build/.../GitSync.app/Contents/MacOS/GitSync --pipe-stress-test  # pipe reader
 ```
 
-When this project is opened in Xcode later, swap the inlined fixture for a real test target reading `all-events.txt` directly.
+These exist because the Command Line Tools toolchain doesn't ship XCTest or swift-testing.
+
+## Inventory data
+
+Stored at `~/Library/Application Support/GitSync/inventory.json` as a JSON array of `Repo` records. Pruned only when the user manually clears the file (no automatic eviction in v1).
+
+## Python CLI flags
+
+The platform scripts accept two app-driven flags in addition to the env-var config:
+
+- `--list-only` — discover, emit `remote_project` events, exit. No clones. Used to refresh the inventory cheaply.
+- `--only <rel>` — discover, then narrow `jobs` to a single repo. Used by the Repositories view's per-repo "Sync this repo" action.
+
+These flags are silently ignored when running the scripts directly from a shell without GIT_SYNC_EVENTS=1; the unbatched output is the same as before.
