@@ -72,6 +72,27 @@ final class AppState: ObservableObject {
         Task { await runner.cancel() }
     }
 
+    // Move the local clones of the given repos to the Trash, after the
+    // standard safety checks (skip dirty trees and unpushed commits).
+    // Inventory rows update to match: stale/disk-only repos disappear
+    // entirely; remote-known repos revert to "not cloned yet".
+    func deleteLocalRepos(_ ids: Set<RepoID>) async -> TrashReport {
+        let root = URL(fileURLWithPath:
+            (settingsStore.syncRoot as NSString).expandingTildeInPath)
+        let report = await RepoTrasher.trash(ids: Array(ids), under: root)
+        for id in report.trashed {
+            let repo = inventory.repos[id]
+            let remoteStillHasIt = repo?.lastSeenRemoteAt != nil
+                && repo?.lastStatus != .staleOnDisk
+            if remoteStillHasIt {
+                inventory.markNotCloned(id)
+            } else {
+                inventory.remove(id)
+            }
+        }
+        return report
+    }
+
     // Per-repo sync triggered from the Repositories view's "Sync this
     // repo" action. Refuses if a run is already in flight (the menu
     // disables the action while isRunning is true). Translates the

@@ -23,6 +23,9 @@ struct GitSyncApp: App {
         if args.contains("--pipe-stress-test") {
             exit(PipeStressTest.run())
         }
+        if args.contains("--trash-test") {
+            exit(TrashTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the

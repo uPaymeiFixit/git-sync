@@ -78,6 +78,31 @@ final class InventoryStore: ObservableObject {
         scheduleSave()
     }
 
+    // ---- Local-delete bookkeeping -------------------------------------
+
+    // The repo's local clone was trashed and the remote doesn't know it
+    // either — drop the row entirely.
+    func remove(_ id: RepoID) {
+        guard repos[id] != nil else { return }
+        repos[id] = nil
+        scheduleSave()
+    }
+
+    // The repo's local clone was trashed but the remote still lists it —
+    // it reverts to a plain "not cloned yet" row.
+    func markNotCloned(_ id: RepoID) {
+        guard var repo = repos[id] else { return }
+        repo.isClonedLocally = false
+        repo.lastStatus = nil
+        repo.lastDetail = ""
+        repo.lastOldSha = ""
+        repo.lastNewSha = ""
+        repo.lastCommitsAhead = 0
+        repo.lastClonedCheckedAt = Date()
+        repos[id] = repo
+        scheduleSave()
+    }
+
     // ---- Seeding (launch-time fill) ----------------------------------
 
     // Walk GIT_SYNC_ROOT looking for .git directories. Each one becomes

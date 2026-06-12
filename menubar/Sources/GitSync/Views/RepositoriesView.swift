@@ -16,7 +16,10 @@ struct RepositoriesView: View {
     @State private var enabledStatuses: Set<SyncStatus> = Set(SyncStatus.allCases)
     @State private var enabledPlatforms: Set<String> = ["gitlab", "github", "bitbucket"]
     @State private var collapsedSections: Set<SyncStatus> = []
-    @State private var selection: RepoID?
+    @State private var selection: Set<RepoID> = []
+    @State private var pendingTrash: Set<RepoID> = []
+    @State private var showTrashConfirm = false
+    @State private var trashSummary: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -134,6 +137,89 @@ struct RepositoriesView: View {
             }
         }
         .listStyle(.inset)
+        // Right-click acts on the current multi-selection (or on just the
+        // row under the cursor when it isn't part of the selection).
+        .contextMenu(forSelectionType: RepoID.self) { ids in
+            contextMenuItems(for: ids)
+        }
+        // Delete key on a selection = same flow as the context-menu item.
+        .onDeleteCommand {
+            guard !selection.isEmpty else { return }
+            requestTrash(selection)
+        }
+        .alert(
+            "Move \(pendingTrash.count) repo(s) to Trash?",
+            isPresented: $showTrashConfirm
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                let ids = pendingTrash
+                Task {
+                    let report = await state.deleteLocalRepos(ids)
+                    selection.subtract(ids)
+                    trashSummary = report.summary
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Repos with uncommitted changes or unpushed commits are skipped automatically. Everything else goes to the Trash, where it can be restored.")
+        }
+        .alert(
+            "Done",
+            isPresented: Binding(
+                get: { trashSummary != nil },
+                set: { if !$0 { trashSummary = nil } }
+            )
+        ) {
+            Button("OK") { trashSummary = nil }
+        } message: {
+            Text(trashSummary ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private func contextMenuItems(for ids: Set<RepoID>) -> some View {
+        if ids.count == 1, let id = ids.first, let repo = inventory.repos[id] {
+            Button("Sync this repo") { state.syncRepo(id) }
+                .disabled(state.isRunning)
+            Button("Reveal in Finder") { RepoActions.reveal(repo: repo, settings: settings) }
+            if !repo.sshURL.isEmpty {
+                Button("Copy SSH URL") {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(repo.sshURL, forType: .string)
+                }
+            }
+            Divider()
+            Button("Add to skip list") {
+                RepoActions.addToSkipList(repo: repo, settings: settings)
+            }
+            .disabled(RepoActions.isInSkipList(repo: repo, settings: settings))
+            if repo.isClonedLocally {
+                Button("Move to Trash…", role: .destructive) {
+                    requestTrash([id])
+                }
+            }
+        } else if !ids.isEmpty {
+            let onDisk = ids.filter { inventory.repos[$0]?.isClonedLocally == true }
+            Button("Add \(ids.count) to skip list") {
+                for id in ids {
+                    if let repo = inventory.repos[id],
+                       !RepoActions.isInSkipList(repo: repo, settings: settings) {
+                        RepoActions.addToSkipList(repo: repo, settings: settings)
+                    }
+                }
+            }
+            if !onDisk.isEmpty {
+                Button("Move \(onDisk.count) to Trash…", role: .destructive) {
+                    requestTrash(Set(onDisk))
+                }
+            }
+        }
+    }
+
+    private func requestTrash(_ ids: Set<RepoID>) {
+        pendingTrash = ids
+        showTrashConfirm = true
     }
 
     // MARK: - Filtering + grouping
@@ -256,7 +342,7 @@ private struct RepoRow: View {
                 .disabled(isInSkipList)
 
                 Button {
-                    reveal()
+                    RepoActions.reveal(repo: repo, settings: settings)
                 } label: {
                     Image(systemName: "folder")
                 }
@@ -264,29 +350,8 @@ private struct RepoRow: View {
                 .help("Reveal in Finder")
             }
         }
-        .contextMenu {
-            Button("Sync this repo") {
-                state.syncRepo(repo.id)
-            }
-            .disabled(state.isRunning)
-
-            Button("Reveal in Finder") { reveal() }
-
-            if !repo.sshURL.isEmpty {
-                Button("Copy SSH URL") {
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(repo.sshURL, forType: .string)
-                }
-            }
-
-            Divider()
-
-            Button("Add to skip list") {
-                addToSkipList()
-            }
-            .disabled(isInSkipList)
-        }
+        // Context menu lives on the List (forSelectionType:) so it can act
+        // on multi-selections; no per-row menu here.
     }
 
     private var statusPill: some View {
@@ -304,7 +369,20 @@ private struct RepoRow: View {
         .help(repo.effectiveStatus.explanation)
     }
 
-    private func reveal() {
+    private var isInSkipList: Bool {
+        RepoActions.isInSkipList(repo: repo, settings: settings)
+    }
+
+    private func addToSkipList() {
+        RepoActions.addToSkipList(repo: repo, settings: settings)
+    }
+}
+
+// Shared repo actions, used by both the row buttons and the List-level
+// multi-selection context menu.
+@MainActor
+enum RepoActions {
+    static func reveal(repo: Repo, settings: SettingsStore) {
         // rel is canonical (includes the platform directory, e.g.
         // "Gitlab/foo/bar"), so the on-disk path is just syncRoot + rel.
         let root = URL(fileURLWithPath:
@@ -322,7 +400,7 @@ private struct RepoRow: View {
 
     // Skip patterns use the platform's namespace path (no "Gitlab/" etc.
     // prefix) — that's what the Python's matches_skip compares against.
-    private var isInSkipList: Bool {
+    static func isInSkipList(repo: Repo, settings: SettingsStore) -> Bool {
         let path = repo.id.namespacePath.lowercased()
         let entries = settings.skipPatterns
             .split(separator: ",")
@@ -330,7 +408,7 @@ private struct RepoRow: View {
         return entries.contains { !$0.isEmpty && path.hasPrefix($0) }
     }
 
-    private func addToSkipList() {
+    static func addToSkipList(repo: Repo, settings: SettingsStore) {
         let trimmed = settings.skipPatterns.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             settings.skipPatterns = repo.id.namespacePath
