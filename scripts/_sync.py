@@ -441,12 +441,19 @@ class Outcome:
     commits_ahead: int = 0
 
 
-def _emit_outcome_event(o: Outcome) -> None:
+def _emit_outcome_event(o: Outcome, platform: str = "") -> None:
     """Send a full Outcome up to the parent (sync-all.py) so the parent
     can rebuild the same object and render one unified summary covering
-    every platform, instead of three separate per-platform summaries."""
+    every platform, instead of three separate per-platform summaries.
+
+    `platform` is attached so the menu-bar app can key outcomes by
+    (platform, rel) without needing to attribute them by which child
+    pipe they arrived on. Default empty for back-compat with consumers
+    that don't care.
+    """
     _emit_event(
         "outcome",
+        platform=platform,
         rel=o.rel,
         status=o.status.value,
         url=o.url,
@@ -458,14 +465,15 @@ def _emit_outcome_event(o: Outcome) -> None:
 
 
 class OutcomeCollector:
-    def __init__(self) -> None:
+    def __init__(self, platform: str = "") -> None:
         self._lock = threading.Lock()
         self._items: list[Outcome] = []
+        self.platform = platform
 
     def add(self, o: Outcome) -> None:
         with self._lock:
             self._items.append(o)
-        _emit_outcome_event(o)
+        _emit_outcome_event(o, platform=self.platform)
 
     @property
     def items(self) -> list[Outcome]:
@@ -1398,9 +1406,9 @@ def finish_run(
     # so the parent's unified summary sees the full picture.
     if _EVENTS_ENABLED:
         for o in skipped:
-            _emit_outcome_event(o)
+            _emit_outcome_event(o, platform=outcomes.platform)
         for o in extras:
-            _emit_outcome_event(o)
+            _emit_outcome_event(o, platform=outcomes.platform)
     return outcomes.items + skipped + extras
 
 

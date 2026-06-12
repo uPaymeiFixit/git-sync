@@ -225,7 +225,7 @@ def main() -> int:
         log_info(f"Skipping {len(skipped)} project(s) matching GIT_SYNC_SKIP.")
 
     log_info(f"Found {len(jobs)} projects to sync. Using {PARALLEL} parallel workers...")
-    outcomes = OutcomeCollector()
+    outcomes = OutcomeCollector(platform="gitlab")
     run_jobs(jobs, outcomes, description="GitLab sync")
 
     log_info(f"Scanning {PLATFORM_ROOT} for stale and non-git directories...")

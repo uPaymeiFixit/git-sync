@@ -33,17 +33,20 @@ _sync._emit_event("worker_phase", rel="group/project-a", phase="resolving", pct=
 _sync._emit_event("worker_finish", rel="group/project-a")
 _sync._emit_event(
     "outcome",
+    platform="gitlab",
     rel="group/project-a", status="cloned", url="git@gitlab.example.com:group/project-a.git",
     detail="", old_sha="", new_sha="abc1234", commits_ahead=0,
 )
 _sync._emit_event(
     "outcome",
+    platform="gitlab",
     rel="group/project-b", status="dirty", url="git@gitlab.example.com:group/project-b.git",
     detail="uncommitted changes blocked fast-forward",
     old_sha="def5678", new_sha="def5678", commits_ahead=0,
 )
 _sync._emit_event(
     "outcome",
+    platform="gitlab",
     rel="group/project-c", status="diverged", url="git@gitlab.example.com:group/project-c.git",
     detail="local has 2 commits not on remote",
     old_sha="aaa1111", new_sha="bbb2222", commits_ahead=2,
