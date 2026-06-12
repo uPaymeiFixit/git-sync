@@ -62,7 +62,8 @@ actor EventBuffer {
             let key = platform + "\u{1F}" + rel
             latestPhase[key] = WorkerPhaseSnapshot(
                 platform: platform, rel: rel, phase: phase, pct: pct)
-        case .workerStart, .workerFinish, .outcome, .sessionStart, .sessionEnd:
+        case .workerStart, .workerFinish, .outcome, .sessionStart, .sessionEnd,
+             .remoteProject:
             events.append(event)
         }
     }

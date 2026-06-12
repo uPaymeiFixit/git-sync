@@ -79,7 +79,18 @@ private struct EventEnvelope: Decodable {
             return .workerFinish(platform: platform, rel: p.rel)
         case "outcome":
             let o = try decoder.decode(Outcome.self, from: data)
-            return .outcome(platform: platform, outcome: o)
+            // Outcome's wire envelope carries platform natively (Python's
+            // _emit_outcome_event added the field). Trust that over the
+            // pipe-attribution fallback when present.
+            return .outcome(platform: o.platform.isEmpty ? platform : o.platform,
+                            outcome: o)
+        case "remote_project":
+            let p = try decoder.decode(RemoteProjectPayload.self, from: data)
+            return .remoteProject(
+                platform: p.platform.isEmpty ? platform : p.platform,
+                rel: p.rel,
+                sshURL: p.sshURL,
+                defaultBranch: p.defaultBranch)
         default:
             return nil
         }
@@ -95,3 +106,15 @@ private struct WorkerPhasePayload: Decodable {
     let pct: Int?
 }
 private struct WorkerFinishPayload: Decodable { let rel: String }
+private struct RemoteProjectPayload: Decodable {
+    let platform: String
+    let rel: String
+    let sshURL: String
+    let defaultBranch: String
+
+    enum CodingKeys: String, CodingKey {
+        case platform, rel
+        case sshURL = "ssh_url"
+        case defaultBranch = "default_branch"
+    }
+}

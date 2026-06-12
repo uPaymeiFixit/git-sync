@@ -441,6 +441,28 @@ class Outcome:
     commits_ahead: int = 0
 
 
+def emit_remote_project(
+    platform: str,
+    rel: str,
+    ssh_url: str,
+    default_branch: "str | None" = None,
+) -> None:
+    """Emit one `remote_project` event for each project the platform's API
+    returned during discovery. The menu-bar app uses this to populate its
+    Repositories inventory with projects that exist remotely — including
+    ones not yet cloned locally or filtered by GIT_SYNC_SKIP.
+
+    No-op when GIT_SYNC_EVENTS is not enabled.
+    """
+    _emit_event(
+        "remote_project",
+        platform=platform,
+        rel=rel,
+        ssh_url=ssh_url,
+        default_branch=default_branch or "",
+    )
+
+
 def _emit_outcome_event(o: Outcome, platform: str = "") -> None:
     """Send a full Outcome up to the parent (sync-all.py) so the parent
     can rebuild the same object and render one unified summary covering

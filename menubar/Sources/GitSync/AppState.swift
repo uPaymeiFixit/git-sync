@@ -164,6 +164,10 @@ final class AppState: ObservableObject {
             }
         case .outcome(_, let outcome):
             currentRun?.outcomes.append(outcome)
+        case .remoteProject:
+            // No-op until the InventoryStore lands; the event is plumbed
+            // through but nothing consumes it yet.
+            break
         }
     }
 }

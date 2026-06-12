@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sync import (  # noqa: E402
     EXIT_SKIPPED, PARALLEL, SYNC_ROOT,
     Job, Outcome, OutcomeCollector, Status,
-    _rel, finish_run,
+    _rel, emit_remote_project, finish_run,
     log_error, log_info, log_ok, log_warn,
     matches_skip, print_outcome_summary, run_jobs,
 )
@@ -212,6 +212,14 @@ def main() -> int:
                 continue
             seen.add(name)
             dest = platform_root / name
+            # Emit BEFORE skip-filtering so the menu-bar app inventory sees
+            # every remote-known repo, not just the ones we end up syncing.
+            emit_remote_project(
+                platform="github",
+                rel=_rel(dest),
+                ssh_url=ssh,
+                default_branch=branch,
+            )
             if matches_skip(name):
                 skipped.append(Outcome(rel=_rel(dest), status=Status.SKIPPED, url=ssh))
                 continue
