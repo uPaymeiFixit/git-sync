@@ -1,42 +1,79 @@
 import Foundation
 
-// Runs blocking git work (RepoSyncer.cloneOrUpdate, which does synchronous
-// subprocess I/O) on REAL OS threads via a concurrent DispatchQueue — not
-// Swift's cooperative task pool.
+// A fixed pool of REAL OS threads for running blocking git work (clone/fetch
+// shell out and block on network+disk I/O). Direct analogue of Python's
+// ThreadPoolExecutor(max_workers=PARALLEL).
 //
-// Why this exists: git clone/fetch BLOCK their thread on network+disk I/O.
-// You want many more of them in flight than you have CPU cores (the work is
-// I/O-bound, not CPU-bound) — that's the whole point of "128 workers". Swift's
-// cooperative concurrency pool is sized ~= core count and is explicitly NOT
-// meant to host blocking calls; doing so risks starvation or thread
-// explosion. A dedicated GCD concurrent queue gives us OS threads that can
-// all sit blocked on I/O at once, exactly like the Python's
-// ThreadPoolExecutor(max_workers=PARALLEL). A semaphore caps the width so we
-// never exceed the configured worker count.
+// WHY NOT the obvious GCD version: the previous implementation did
+// `concurrentQueue.async { semaphore.wait(); work() }`. At width=128 GCD
+// eagerly schedules many blocks, each PARKS a GCD worker thread on the
+// semaphore, GCD hits its ~70-thread soft limit with every thread blocked,
+// and nothing progresses — a thread-explosion deadlock. Blocking a GCD
+// worker thread on a semaphore is the documented antipattern.
 //
-// `run` is async and bridges the blocking call back to the caller's task via
-// a continuation, so the engine's TaskGroup orchestration is unchanged.
+// This version creates exactly `width` long-lived worker threads up front.
+// Each worker loops: pull a job off a condition-guarded queue, run the
+// blocking closure ON ITS OWN OS THREAD, resume the job's continuation, repeat.
+// Thread count is therefore strictly bounded at `width` and never grows.
+// Submitting (`run`) never blocks an OS thread: it appends to the queue under
+// a brief lock and signals; the calling Swift TASK suspends on the
+// continuation (not a thread) until a worker finishes the work.
 final class GitWorkPool: @unchecked Sendable {
-    private let queue: DispatchQueue
-    private let slots: DispatchSemaphore
+    // A queued unit of work: the closure to run and the resume hook. Type
+    // erasure (the closure already captures its own T and resumes the
+    // continuation) keeps the queue homogeneous.
+    private typealias Job = @Sendable () -> Void
+
+    private let cond = NSCondition()
+    private var jobs: [Job] = []          // guarded by cond
+    private var shuttingDown = false      // guarded by cond
+    private let width: Int
 
     init(width: Int) {
-        let w = max(1, width)
-        self.queue = DispatchQueue(label: "com.uPaymeiFixit.GitSync.work",
-                                   qos: .userInitiated, attributes: .concurrent)
-        self.slots = DispatchSemaphore(value: w)
+        self.width = max(1, width)
+        for i in 0..<self.width {
+            let t = Thread { [weak self] in self?.workerLoop() }
+            t.name = "GitWorkPool-\(i)"
+            t.stackSize = 4 << 20          // 4 MB; git output buffers are small
+            t.start()
+        }
     }
 
-    // Runs `work` on a pool thread, suspending the calling task (not a pool
-    // thread) until it completes. The semaphore bounds concurrent blocking
-    // ops to `width`.
+    deinit {
+        cond.lock()
+        shuttingDown = true
+        cond.broadcast()                  // wake idle workers so they can exit
+        cond.unlock()
+    }
+
+    // Worker thread main loop. Blocks (releasing the lock) until a job is
+    // available or shutdown is requested. Runs the blocking job OUTSIDE the
+    // lock so workers don't serialize.
+    private func workerLoop() {
+        while true {
+            cond.lock()
+            while jobs.isEmpty && !shuttingDown {
+                cond.wait()
+            }
+            if shuttingDown && jobs.isEmpty {
+                cond.unlock()
+                return
+            }
+            let job = jobs.removeFirst()
+            cond.unlock()
+            job()                          // blocking git work, off the lock
+        }
+    }
+
+    // Submit blocking work; suspend the calling task until it completes.
+    // Never blocks an OS thread on a lock/semaphore — only appends + signals.
     func run<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
         await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
-            queue.async {
-                self.slots.wait()
-                defer { self.slots.signal() }
-                cont.resume(returning: work())
-            }
+            let job: Job = { cont.resume(returning: work()) }
+            cond.lock()
+            jobs.append(job)
+            cond.signal()                  // wake one idle worker
+            cond.unlock()
         }
     }
 }
