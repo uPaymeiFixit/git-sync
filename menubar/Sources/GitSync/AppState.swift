@@ -121,9 +121,14 @@ final class AppState: ObservableObject {
 
     private func startDrainTimer() {
         drainTimer?.invalidate()
-        drainTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        // .common run-loop mode, not .default: menu tracking pauses
+        // .default-mode timers, which would freeze the live progress shown
+        // in the open menu (and back events up) for as long as it's open.
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.drainOnce() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        drainTimer = timer
     }
 
     private func stopDrainTimer() {

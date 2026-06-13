@@ -64,18 +64,7 @@ struct GitSyncApp: App {
                     installTerminationGuard()
                 }
         } label: {
-            // isRunning covers every trigger — manual Run now, scheduled
-            // runs, and per-repo syncs — so the animation needs no extra
-            // wiring per source. .rotate is macOS 15+; 14 keeps the pulse.
-            if #available(macOS 15.0, *) {
-                Image(systemName: state.menuBarIconName)
-                    .symbolEffect(.rotate, options: .repeat(.continuous), isActive: state.isRunning)
-                    .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
-            } else {
-                Image(systemName: state.menuBarIconName)
-                    .symbolEffect(.pulse, options: .repeating, isActive: state.isRunning)
-                    .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
-            }
+            MenuBarIcon(state: state)
         }
         .menuBarExtraStyle(.menu)
 
@@ -101,6 +90,57 @@ struct GitSyncApp: App {
                 .environmentObject(history)
         }
         .windowResizability(.contentSize)
+    }
+
+    // The status item renders its label as a flattened snapshot, so SwiftUI
+    // animations (symbolEffect, withAnimation, TimelineView) never advance
+    // inside it — the only thing that repaints a status item is a state
+    // change. So we spin the old-fashioned way: a timer steps the angle
+    // while a run is active, and every step forces a fresh snapshot.
+    // isRunning covers every trigger — manual Run now, scheduled runs, and
+    // per-repo syncs — so no extra wiring per source.
+    private struct MenuBarIcon: View {
+        @ObservedObject var state: AppState
+        @StateObject private var spin = SpinDriver()
+
+        var body: some View {
+            Image(systemName: state.menuBarIconName)
+                .rotationEffect(.degrees(spin.degrees))
+                // Square frame so the wide glyph's arrowheads stay inside
+                // the snapshot bounds mid-rotation instead of clipping.
+                .frame(width: 19, height: 19)
+                .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
+                .onAppear { spin.setRunning(state.isRunning) }
+                .onChange(of: state.isRunning) { _, running in
+                    spin.setRunning(running)
+                }
+        }
+    }
+
+    @MainActor
+    private final class SpinDriver: ObservableObject {
+        @Published var degrees: Double = 0
+        private var timer: Timer?
+
+        func setRunning(_ running: Bool) {
+            timer?.invalidate()
+            timer = nil
+            guard running else {
+                degrees = 0   // rest upright between runs
+                return
+            }
+            // 12° per 1/15s ≈ one revolution every 2s. Added in .common
+            // mode so the spin keeps going while the menu is open (menu
+            // tracking pauses .default-mode timers).
+            let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.degrees = (self.degrees + 12).truncatingRemainder(dividingBy: 360)
+                }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
+        }
     }
 
     // Quit-while-running cleanup. Without this, the .app's process exits
