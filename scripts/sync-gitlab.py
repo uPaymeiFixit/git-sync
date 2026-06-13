@@ -153,6 +153,45 @@ def _check_glab_available() -> None:
         )
 
 
+def _sync_only(target: str) -> int:
+    """Fast path for `--only <rel>`: fetch one project's metadata via the
+    single-project endpoint instead of paging the whole listing, then sync
+    just that repo. `target` is sync-root-relative, e.g. "Gitlab/foo/bar"."""
+    import urllib.parse
+
+    ns = target.split("/", 1)[1] if "/" in target else target  # strip "Gitlab/"
+    enc = urllib.parse.quote(ns, safe="")
+    try:
+        p = glab_api(f"projects/{enc}", paginate=False)
+    except (RuntimeError, json.JSONDecodeError) as e:
+        log_error(f"--only {target}: cannot fetch project {ns}: {e}")
+        return 1
+    branch = p.get("default_branch")
+    url = p.get("ssh_url_to_repo")
+    path_ns = p.get("path_with_namespace")
+    if not branch or not url or not path_ns:
+        log_warn(f"--only {target}: project has no default branch or SSH URL; nothing to sync.")
+        return 1
+    dest = PLATFORM_ROOT / path_ns
+    emit_remote_project(platform="gitlab", rel=_rel(dest), ssh_url=url, default_branch=branch)
+    if matches_skip(path_ns):
+        log_info(f"--only {target}: matches GIT_SYNC_SKIP; nothing to do.")
+        return 0
+    job = Job(ssh_url=url, dest=dest, branch=branch)
+    outcomes = OutcomeCollector(platform="gitlab")
+    run_jobs([job], outcomes, description="GitLab sync")
+    all_outcomes = finish_run(
+        PLATFORM_ROOT, [job], [], outcomes,
+        discovery_complete=True, skip_stale_scan=True,
+    )
+    had_errors = print_outcome_summary(all_outcomes)
+    if had_errors:
+        log_warn("GitLab sync finished with errors. Re-run to retry.")
+        return 1
+    log_ok("GitLab sync complete.")
+    return 0
+
+
 def main() -> int:
     cli = parse_cli_args(sys.argv)
 
@@ -182,6 +221,13 @@ def main() -> int:
         log_error(f"Cannot reach {GITLAB_HOST}/api/v4 — is VPN up?")
         log_error(str(e))
         return 1
+
+    # --only fast path: fetch just the one project instead of paging the
+    # entire visible project list (which dominates the wall-clock for a
+    # single-repo sync). Inventory refresh is scoped to this one repo by
+    # design — the whole-inventory refresh stays the job of a full run.
+    if cli.only is not None:
+        return _sync_only(cli.only)
 
     archived_qs = "" if INCLUDE_ARCHIVED else "&archived=false"
     archived_msg = " (including archived)" if INCLUDE_ARCHIVED else ""
@@ -233,16 +279,8 @@ def main() -> int:
         log_info(f"--list-only: discovered {len(jobs) + len(skipped)} project(s); exiting without sync.")
         return EXIT_SKIPPED
 
-    # --only <rel>: filter jobs to a single repo. Discovery still runs
-    # (so the inventory event stream stays accurate); we just narrow the
-    # actual sync to the one repo the user asked for.
-    if cli.only is not None:
-        target = cli.only
-        jobs = [j for j in jobs if _rel(j.dest) == target]
-        skipped = []  # only matters to finish_run's stale-on-disk scan
-        if not jobs:
-            log_warn(f"--only {target}: no matching project in the remote listing.")
-            return 1
+    # Note: --only is handled by the _sync_only fast path before discovery,
+    # so it never reaches here.
 
     if not jobs and not skipped:
         log_warn("No projects found. Nothing to do.")

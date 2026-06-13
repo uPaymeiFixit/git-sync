@@ -127,6 +127,42 @@ def http_get_json(url: str, auth: str, *, attempts: int = 5, backoff: float = 2.
     raise RuntimeError(f"GET {url} failed after {attempts} attempts: {last_err}")
 
 
+def _sync_only(target: str, auth: str, platform_root: Path) -> int:
+    """Fast path for `--only <rel>`: fetch one repo via GET /repos/{org}/{name}
+    instead of paging the whole org listing. `target` is sync-root-relative,
+    e.g. "Github/my-repo"."""
+    name = target.split("/", 1)[1] if "/" in target else target  # strip "Github/"
+    try:
+        v, _ = http_get_json(f"{API}/repos/{ORG}/{name}", auth, attempts=3)
+    except HTTPCode as e:
+        log_error(f"--only {target}: GET /repos/{ORG}/{name} → {e.code} {e.reason}")
+        return 1
+    except RuntimeError as e:
+        log_error(f"--only {target}: cannot fetch repo {name}: {e}")
+        return 1
+    branch = v.get("default_branch")
+    ssh = v.get("ssh_url")
+    repo_name = v.get("name")
+    if not branch or not ssh or not repo_name:
+        log_warn(f"--only {target}: repo has no default branch or SSH URL; nothing to sync.")
+        return 1
+    dest = platform_root / repo_name
+    emit_remote_project(platform="github", rel=_rel(dest), ssh_url=ssh, default_branch=branch)
+    if matches_skip(repo_name):
+        log_info(f"--only {target}: matches GIT_SYNC_SKIP; nothing to do.")
+        return 0
+    job = Job(ssh_url=ssh, dest=dest, branch=branch)
+    outcomes = OutcomeCollector(platform="github")
+    run_jobs([job], outcomes, description="GitHub sync")
+    all_outcomes = finish_run(platform_root, [job], [], outcomes, skip_stale_scan=True)
+    had_errors = print_outcome_summary(all_outcomes)
+    if had_errors:
+        log_warn("GitHub sync finished with errors. Re-run to retry.")
+        return 1
+    log_ok("GitHub sync complete.")
+    return 0
+
+
 def main() -> int:
     cli = parse_cli_args(sys.argv)
 
@@ -189,6 +225,12 @@ def main() -> int:
         log_error(f"GitHub pre-flight: {e}")
         return 1
 
+    # --only fast path: fetch just the one repo instead of paging the whole
+    # org listing. Inventory refresh is scoped to this repo by design — the
+    # whole-inventory refresh stays the job of a full run.
+    if cli.only is not None:
+        return _sync_only(cli.only, auth, platform_root)
+
     log_info(f"Listing repos in org '{ORG}'...")
     jobs: list[Job] = []
     skipped: list[Outcome] = []
@@ -232,14 +274,8 @@ def main() -> int:
         log_info(f"--list-only: discovered {len(jobs) + len(skipped)} repo(s); exiting without sync.")
         return EXIT_SKIPPED
 
-    # --only <rel>: narrow jobs to the single repo the user asked for.
-    if cli.only is not None:
-        target = cli.only
-        jobs = [j for j in jobs if _rel(j.dest) == target]
-        skipped = []
-        if not jobs:
-            log_warn(f"--only {target}: no matching repo in the remote listing.")
-            return 1
+    # Note: --only is handled by the _sync_only fast path before discovery,
+    # so it never reaches here.
 
     if not jobs and not skipped:
         log_warn(f"No repos found in org '{ORG}'. Nothing to do.")
