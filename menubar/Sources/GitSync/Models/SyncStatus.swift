@@ -76,7 +76,7 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .updated:       return "Local branch fast-forwarded to the new remote tip."
         case .updatedDirty:  return "Fast-forwarded over uncommitted changes on paths that didn't collide."
         case .upToDate:      return "Already in sync with the remote; nothing to do."
-        case .emptyRemote:   return "The repo still exists on the remote but has no commits — someone created it and never pushed. Nothing to sync, nothing on disk."
+        case .emptyRemote:   return "(Legacy) Older syncs reported this for remote repos with zero commits. Empty repos now clone as empty working copies and show up-to-date — run a sync to clear this."
         case .dirty:         return "Working tree has uncommitted changes; sync was blocked to protect them."
         case .diverged:      return "Local has commits not on the remote, or is checked out to a non-default branch."
         case .branchMissing: return "The remote no longer has the default branch this repo was tracking."

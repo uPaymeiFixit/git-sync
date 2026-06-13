@@ -1011,6 +1011,16 @@ def _has_any_ref(repo: Path) -> bool:
     return rc == 0
 
 
+def _remote_has_no_refs(repo: Path) -> bool:
+    """True iff origin is reachable and has zero refs (an empty repo).
+    ls-remote exits 0 with empty output for a ref-less remote on every
+    transport, unlike fetch whose failure text varies. Costs one network
+    round-trip, so only call this on paths where fetch already failed.
+    """
+    rc, out = _git(repo, "ls-remote", "--quiet", "origin")
+    return rc == 0 and not out.strip()
+
+
 def _is_dirty(repo: Path) -> bool:
     rc, out = _git(repo, "status", "--porcelain")
     return rc == 0 and bool(out.strip())
@@ -1140,16 +1150,28 @@ def _clone_or_update_inner(
             on_line=_on_line,
         )
         if not ok:
-            # `git fetch` returns nonzero with empty output when the remote has no refs
-            # at all (a freshly-created, never-pushed-to repo). Treat as in-sync.
-            if not out.strip() and not _has_any_ref(dest):
-                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
-                return
-            # Remote has no usable HEAD — typically an empty repo whose API
-            # metadata still claims a default branch. Same classification as
-            # the clone path.
-            if _NO_MATCHING_HEAD_RE.search(out):
-                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+            # A failed fetch on an empty remote produces transport-dependent
+            # output: empty over SSH, "no matching remote head" on some
+            # servers, "couldn't find remote ref" locally. Rather than
+            # pattern-match them all, confirm with ls-remote (exit 0 + no
+            # output = ref-less remote on every transport). Cheap fast-path
+            # first: empty output + empty local clone needs no round-trip.
+            remote_empty = (not out.strip() and not _has_any_ref(dest)) \
+                or _NO_MATCHING_HEAD_RE.search(out) is not None \
+                or _remote_has_no_refs(dest)
+            if remote_empty:
+                if _has_any_ref(dest):
+                    # Local-only commits against an empty remote are
+                    # unpushed work the user should see, never touch.
+                    outcomes.add(Outcome(
+                        rel, Status.DIVERGED, url=ssh_url,
+                        detail="local has commits; remote is empty",
+                    ))
+                else:
+                    outcomes.add(Outcome(
+                        rel, Status.UP_TO_DATE, url=ssh_url,
+                        detail="empty repository (no commits yet)",
+                    ))
                 return
             outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out)))
             return
@@ -1163,7 +1185,10 @@ def _clone_or_update_inner(
                     detail=f"remote has no '{branch}'",
                 ))
             else:
-                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+                outcomes.add(Outcome(
+                    rel, Status.UP_TO_DATE, url=ssh_url,
+                    detail="empty repository (no commits yet)",
+                ))
             return
 
         was_dirty = _is_dirty(dest)
@@ -1253,13 +1278,14 @@ def _clone_or_update_inner(
         outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url))
         return
 
-    # Remote responded but has no usable HEAD — typically an empty repo whose
-    # API metadata still claims a default branch. Not a real failure.
-    if _NO_MATCHING_HEAD_RE.search(out):
-        outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
-        return
-
-    if _BRANCH_MISSING_RE.search(out):
+    # The branch-pinned clone failed because the remote has no usable HEAD
+    # (typically an empty repo whose API metadata still claims a default
+    # branch) or lacks the specific branch the API reported. Either way,
+    # retry unpinned: an empty repo clones fine without -b — git leaves a
+    # valid .git with zero refs — and a repo whose real default branch
+    # differs from the API's claim clones its actual HEAD. This keeps
+    # empty repos cloned-and-in-sync instead of perpetually re-reported.
+    if _NO_MATCHING_HEAD_RE.search(out) or _BRANCH_MISSING_RE.search(out):
         if not _safe_under_root(dest):
             outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail="dest outside SYNC_ROOT"))
             return
@@ -1277,8 +1303,11 @@ def _clone_or_update_inner(
             if _has_any_ref(dest):
                 outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url, detail="default branch differs from API"))
             else:
-                outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
+                outcomes.add(Outcome(rel, Status.CLONED, url=ssh_url, detail="empty repository (no commits yet)"))
         elif _NO_MATCHING_HEAD_RE.search(out2):
+            # Even an unpinned clone couldn't produce a repo — rare server
+            # quirk. Keep the legacy classification rather than alarming
+            # with ERROR; the next run retries from scratch.
             outcomes.add(Outcome(rel, Status.EMPTY_REMOTE, url=ssh_url))
         else:
             outcomes.add(Outcome(rel, Status.ERROR, url=ssh_url, detail=_tail(out2)))
