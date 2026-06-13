@@ -64,9 +64,18 @@ struct GitSyncApp: App {
                     installTerminationGuard()
                 }
         } label: {
-            Image(systemName: state.menuBarIconName)
-                .symbolEffect(.pulse, options: .repeating, isActive: state.isRunning)
-                .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
+            // isRunning covers every trigger — manual Run now, scheduled
+            // runs, and per-repo syncs — so the animation needs no extra
+            // wiring per source. .rotate is macOS 15+; 14 keeps the pulse.
+            if #available(macOS 15.0, *) {
+                Image(systemName: state.menuBarIconName)
+                    .symbolEffect(.rotate, options: .repeat(.continuous), isActive: state.isRunning)
+                    .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
+            } else {
+                Image(systemName: state.menuBarIconName)
+                    .symbolEffect(.pulse, options: .repeating, isActive: state.isRunning)
+                    .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
+            }
         }
         .menuBarExtraStyle(.menu)
 
