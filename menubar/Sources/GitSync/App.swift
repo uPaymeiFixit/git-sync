@@ -39,6 +39,9 @@ struct GitSyncApp: App {
         if args.contains("--abort-reset-test") {
             exit(AbortResetTest.run())
         }
+        if args.contains("--parallelism-test") {
+            exit(ParallelismTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the
@@ -101,6 +104,7 @@ struct GitSyncApp: App {
         Window("Run history", id: "history") {
             HistoryWindow()
                 .environmentObject(history)
+                .environmentObject(state)
         }
         .windowResizability(.contentSize)
     }

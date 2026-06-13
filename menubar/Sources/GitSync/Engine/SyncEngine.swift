@@ -147,19 +147,35 @@ actor SyncEngine {
         }
     }
 
-    // Build a GitContext whose makeEnv injects the SSH-multiplexed
-    // GIT_SSH_COMMAND for this repo's shard.
-    private func gitContext(mux: SSHMultiplexer, rel: String) -> GitContext {
+    // Immutable, Sendable snapshot of the actor config the per-repo git work
+    // needs. Captured ONCE on the actor before fan-out, then handed to the
+    // nonisolated worker so each repo's clone/fetch runs OFF the actor — that
+    // is what makes the TaskGroup actually parallel. (Previously runSync was
+    // actor-isolated and ran the blocking git work synchronously on the
+    // actor, so all N "parallel" tasks serialized through the single actor —
+    // they ticked down one at a time, never truly concurrent.)
+    struct WorkConfig: Sendable {
+        let baseEnv: [String: String]
+        let syncRoot: URL
+        let depth: Int
+        let timeout: TimeInterval
+    }
+    private func workConfig() -> WorkConfig {
+        WorkConfig(baseEnv: env, syncRoot: syncRoot, depth: depth, timeout: timeout)
+    }
+
+    // Build a GitContext for one repo. nonisolated + static: no actor state,
+    // so callers run it (and the git work) off the actor concurrently.
+    nonisolated static func gitContext(_ cfg: WorkConfig, mux: SSHMultiplexer, rel: String,
+                                       abort: AbortBox, sink: EngineSink,
+                                       platform: String) -> GitContext {
         let shard = mux.shard(for: rel)
-        let baseEnv = env
         let sshCmd = mux.sshCommand(shard: shard)
-        let root = syncRoot
-        let d = depth
-        let to = timeout
-        return GitContext(
-            syncRoot: root,
-            depth: d,
-            timeout: to,
+        let baseEnv = cfg.baseEnv
+        var ctx = GitContext(
+            syncRoot: cfg.syncRoot,
+            depth: cfg.depth,
+            timeout: cfg.timeout,
             makeEnv: {
                 var e = baseEnv
                 e["LC_ALL"] = "C"
@@ -168,6 +184,34 @@ actor SyncEngine {
                 return e
             }
         )
+        ctx.isAborted = { abort.value }
+        ctx.onProgress = { phase, pct in
+            Task { await sink.emit(.workerPhase(platform: platform, rel: rel, phase: phase, pct: pct)) }
+        }
+        return ctx
+    }
+
+    // Runs one repo's clone_or_update OFF the actor (nonisolated static).
+    // This is the unit the TaskGroup parallelizes.
+    nonisolated static func syncOne(
+        cfg: WorkConfig, mux: SSHMultiplexer, platform: String, rel: String,
+        sshURL: String, branch: String, abort: AbortBox, sink: EngineSink,
+        pool: GitWorkPool
+    ) async -> Outcome {
+        let dest = cfg.syncRoot.appendingPathComponent(rel)
+        await sink.emit(.workerStart(platform: platform, rel: rel,
+            op: FileManager.default.fileExists(atPath: dest.appendingPathComponent(".git").path) ? "fetch" : "clone"))
+        let ctx = gitContext(cfg, mux: mux, rel: rel, abort: abort, sink: sink, platform: platform)
+        // RepoSyncer.cloneOrUpdate BLOCKS on subprocess I/O — run it on the
+        // OS-thread work pool (not the cooperative pool), so N of them can sit
+        // blocked on network/disk at once. The pool's semaphore bounds width.
+        let outcome = await pool.run {
+            RepoSyncer.cloneOrUpdate(platform: platform, rel: rel, sshURL: sshURL,
+                                     dest: dest, branch: branch, ctx: ctx)
+        }
+        await sink.emit(.workerFinish(platform: platform, rel: rel))
+        await sink.emit(.outcome(platform: platform, outcome: outcome))
+        return outcome
     }
 
     private func runFull(listOnly: Bool = false) async {
@@ -283,20 +327,23 @@ actor SyncEngine {
         let warmed = mux.prewarm(hosts: SSHMultiplexer.uniqueHosts([sshURL]))
         defer { mux.cleanup(pairs: warmed) }
 
-        let dest = syncRoot.appendingPathComponent(id.rel)
-        await sink.emit(.workerStart(platform: id.platform, rel: id.rel,
-                                     op: FileManager.default.fileExists(atPath: dest.appendingPathComponent(".git").path) ? "fetch" : "clone"))
-        let outcome = await runSync(platform: id.platform, rel: id.rel, sshURL: sshURL,
-                                    dest: dest, branch: branch, mux: mux)
-        await sink.emit(.workerFinish(platform: id.platform, rel: id.rel))
-        await sink.emit(.outcome(platform: id.platform, outcome: outcome))
+        _ = await SyncEngine.syncOne(
+            cfg: workConfig(), mux: mux, platform: id.platform, rel: id.rel,
+            sshURL: sshURL, branch: branch, abort: abortBox, sink: sink,
+            pool: GitWorkPool(width: 1))
         await sink.individualFinished(id, exitCode: 0)
     }
 
-    // Bounded fan-out: at most `parallel` repos syncing at once.
+    // Bounded fan-out: at most `parallel` repos syncing at once, each running
+    // OFF the actor via the nonisolated syncOne. The TaskGroup tasks no longer
+    // hop back onto the actor for the git work, so they genuinely overlap.
     private func fanOut(_ jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool)],
                         mux: SSHMultiplexer) async {
         let cap = max(1, parallel)
+        let cfg = workConfig()
+        let sink = self.sink
+        let abort = self.abortBox
+        let pool = GitWorkPool(width: cap)
         var index = 0
         await withTaskGroup(of: Void.self) { group in
             var running = 0
@@ -304,15 +351,11 @@ actor SyncEngine {
                 guard index < jobs.count else { return }
                 let job = jobs[index]; index += 1
                 running += 1
-                group.addTask { [weak self] in
-                    guard let self else { return }
-                    let dest = await self.syncRoot.appendingPathComponent(job.repo.rel)
-                    await self.sink.emit(.workerStart(platform: job.platform.rawValue, rel: job.repo.rel,
-                        op: FileManager.default.fileExists(atPath: dest.appendingPathComponent(".git").path) ? "fetch" : "clone"))
-                    let outcome = await self.runSync(platform: job.platform.rawValue, rel: job.repo.rel,
-                        sshURL: job.repo.sshURL, dest: dest, branch: job.repo.defaultBranch, mux: mux)
-                    await self.sink.emit(.workerFinish(platform: job.platform.rawValue, rel: job.repo.rel))
-                    await self.sink.emit(.outcome(platform: job.platform.rawValue, outcome: outcome))
+                group.addTask {
+                    _ = await SyncEngine.syncOne(
+                        cfg: cfg, mux: mux, platform: job.platform.rawValue, rel: job.repo.rel,
+                        sshURL: job.repo.sshURL, branch: job.repo.defaultBranch,
+                        abort: abort, sink: sink, pool: pool)
                 }
             }
             for _ in 0..<min(cap, jobs.count) { startNext() }
@@ -324,30 +367,9 @@ actor SyncEngine {
         }
     }
 
-    // Run one repo's clone_or_update with progress events wired to the sink.
-    private func runSync(platform: String, rel: String, sshURL: String, dest: URL,
-                         branch: String, mux: SSHMultiplexer) async -> Outcome {
-        let sink = self.sink
-        var ctx = gitContext(mux: mux, rel: rel)
-        ctx.isAborted = { [weak self] in
-            // Non-actor read; aborted is only ever set true, so a stale false
-            // read just means one more git op runs before we notice — safe.
-            self?.abortedUnsafe ?? false
-        }
-        ctx.onProgress = { phase, pct in
-            Task { await sink.emit(.workerPhase(platform: platform, rel: rel, phase: phase, pct: pct)) }
-        }
-        return RepoSyncer.cloneOrUpdate(platform: platform, rel: rel, sshURL: sshURL,
-                                        dest: dest, branch: branch, ctx: ctx)
-    }
-
-    // nonisolated read of the abort flag for the @Sendable isAborted closure.
-    nonisolated var abortedUnsafe: Bool {
-        // Reading actor state nonisolated isn't allowed directly; we mirror
-        // the flag into an atomic-ish box.
-        abortBox.value
-    }
-    private let abortBox = AbortBox()
+    // The abort flag, readable from the nonisolated worker without hopping
+    // onto the actor.
+    let abortBox = AbortBox()
 
     private func platformDir(_ p: Platform) -> String {
         switch p { case .gitlab: return "Gitlab"; case .github: return "Github"; case .bitbucket: return "Bitbucket" }
