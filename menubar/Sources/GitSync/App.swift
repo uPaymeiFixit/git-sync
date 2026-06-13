@@ -92,23 +92,28 @@ struct GitSyncApp: App {
         .windowResizability(.contentSize)
     }
 
-    // The status item renders its label as a flattened snapshot, so SwiftUI
-    // animations (symbolEffect, withAnimation, TimelineView) never advance
-    // inside it — the only thing that repaints a status item is a state
-    // change. So we spin the old-fashioned way: a timer steps the angle
-    // while a run is active, and every step forces a fresh snapshot.
-    // isRunning covers every trigger — manual Run now, scheduled runs, and
-    // per-repo syncs — so no extra wiring per source.
+    // Animating the menu-bar icon is harder than it looks. A MenuBarExtra
+    // with .menu style renders its label into the NSStatusItem button as a
+    // flattened bitmap. AppKit re-rasterizes that bitmap on discrete,
+    // *meaningful* changes — the glyph name flipping, the tint changing —
+    // but NOT for a continuous stream of tiny rotationEffect deltas: from
+    // its side that's "same glyph, same color, just nudged," and the
+    // status-item snapshot cache skips it. That's why both symbolEffect
+    // (.rotate) and a manual rotationEffect timer drew nothing.
+    //
+    // So we animate the one way AppKit reliably honors: by swapping the
+    // glyph *name* on a cadence. Each frame is a distinct SF Symbol, so
+    // each tick is a real state change AppKit re-snapshots. isRunning
+    // covers every trigger — manual Run now, scheduled runs, per-repo
+    // syncs — so no extra wiring per source.
     private struct MenuBarIcon: View {
         @ObservedObject var state: AppState
         @StateObject private var spin = SpinDriver()
 
         var body: some View {
-            Image(systemName: state.menuBarIconName)
-                .rotationEffect(.degrees(spin.degrees))
-                // Square frame so the wide glyph's arrowheads stay inside
-                // the snapshot bounds mid-rotation instead of clipping.
-                .frame(width: 19, height: 19)
+            Image(systemName: state.isRunning
+                  ? SpinDriver.frames[spin.frame]
+                  : state.menuBarIconName)
                 .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
                 .onAppear { spin.setRunning(state.isRunning) }
                 .onChange(of: state.isRunning) { _, running in
@@ -119,23 +124,32 @@ struct GitSyncApp: App {
 
     @MainActor
     private final class SpinDriver: ObservableObject {
-        @Published var degrees: Double = 0
+        // Four "clock" SF Symbols whose fill sweeps around the dial. Cycled
+        // in order they read as a rotating indicator. These are distinct
+        // glyph names, so each step is a snapshot AppKit honors (a smooth
+        // rotationEffect is not — see MenuBarIcon's note).
+        static let frames = [
+            "circle.bottomhalf.filled",
+            "circle.lefthalf.filled",
+            "circle.tophalf.filled",
+            "circle.righthalf.filled",
+        ]
+
+        @Published var frame: Int = 0
         private var timer: Timer?
 
         func setRunning(_ running: Bool) {
             timer?.invalidate()
             timer = nil
-            guard running else {
-                degrees = 0   // rest upright between runs
-                return
-            }
-            // 12° per 1/15s ≈ one revolution every 2s. Added in .common
-            // mode so the spin keeps going while the menu is open (menu
-            // tracking pauses .default-mode timers).
-            let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            frame = 0
+            guard running else { return }
+            // ~0.22s/frame → one full sweep every ~0.9s. Added in .common
+            // mode so the animation keeps going while the menu is open
+            // (menu tracking pauses .default-mode timers).
+            let t = Timer(timeInterval: 0.22, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.degrees = (self.degrees + 12).truncatingRemainder(dividingBy: 360)
+                    self.frame = (self.frame + 1) % SpinDriver.frames.count
                 }
             }
             RunLoop.main.add(t, forMode: .common)
