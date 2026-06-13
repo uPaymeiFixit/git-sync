@@ -18,6 +18,17 @@ BASE = Path("/tmp/gitsync-empty-test")
 shutil.rmtree(BASE, ignore_errors=True)
 (BASE / "root" / "Gitlab").mkdir(parents=True)
 
+# Disable commit signing + pin an identity for every git subprocess, so
+# throwaway fixture commits don't depend on the user's global signing setup
+# (commit.gpgsign=true + SSH/1Password signer fails with exit 128 when the
+# agent is locked).
+_overrides = [("commit.gpgsign", "false"), ("tag.gpgsign", "false"),
+              ("user.email", "fixture@example.invalid"), ("user.name", "GitSync Fixture")]
+for _i, (_k, _v) in enumerate(_overrides):
+    os.environ[f"GIT_CONFIG_KEY_{_i}"] = _k
+    os.environ[f"GIT_CONFIG_VALUE_{_i}"] = _v
+os.environ["GIT_CONFIG_COUNT"] = str(len(_overrides))
+
 os.environ["GIT_SYNC_ROOT"] = str(BASE / "root")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sync  # noqa: E402

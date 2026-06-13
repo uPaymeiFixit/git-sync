@@ -91,6 +91,18 @@ enum AbortResetTest {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
+        // Disable signing + pin identity so the seed commit doesn't depend on
+        // the user's global commit.gpgsign + SSH/1Password signer (which fails
+        // with exit 128 when the agent is locked).
+        var env = ProcessInfo.processInfo.environment
+        let overrides = [("commit.gpgsign", "false"), ("tag.gpgsign", "false"),
+                         ("user.email", "fixture@example.invalid"), ("user.name", "GitSync Fixture")]
+        for (i, kv) in overrides.enumerated() {
+            env["GIT_CONFIG_KEY_\(i)"] = kv.0
+            env["GIT_CONFIG_VALUE_\(i)"] = kv.1
+        }
+        env["GIT_CONFIG_COUNT"] = String(overrides.count)
+        p.environment = env
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         try? p.run()

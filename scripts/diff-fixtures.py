@@ -28,6 +28,24 @@ import sys
 from pathlib import Path
 
 
+# Disable commit signing and pin an identity for EVERY git subprocess this
+# script (and the engine/oracle it drives) spawns. The user's global config
+# may set commit.gpgsign=true with an SSH/1Password signer; throwaway fixture
+# repos must not depend on that agent being available (it makes `git commit`
+# fail with exit 128 when the agent is locked). GIT_CONFIG_* injects config
+# without touching any config file.
+_GIT_CONFIG_OVERRIDES = [
+    ("commit.gpgsign", "false"),
+    ("tag.gpgsign", "false"),
+    ("user.email", "fixture@example.invalid"),
+    ("user.name", "GitSync Fixture"),
+]
+for _i, (_k, _v) in enumerate(_GIT_CONFIG_OVERRIDES):
+    os.environ[f"GIT_CONFIG_KEY_{_i}"] = _k
+    os.environ[f"GIT_CONFIG_VALUE_{_i}"] = _v
+os.environ["GIT_CONFIG_COUNT"] = str(len(_GIT_CONFIG_OVERRIDES))
+
+
 def sh(*args: str, cwd: str | None = None) -> None:
     subprocess.run(args, check=True, capture_output=True, cwd=cwd)
 
