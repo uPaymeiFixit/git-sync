@@ -31,6 +31,8 @@ mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 mkdir -p "${APP_BUNDLE}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp Resources/Info.plist "${APP_BUNDLE}/Contents/Info.plist"
+# App icon — regenerate with Tools/make-icns.sh after design changes.
+cp Resources/AppIcon.icns "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 
 # Bundle the Python sync scripts under Resources/scripts so the app is
 # self-contained — users don't need to clone the repo to run syncs.
