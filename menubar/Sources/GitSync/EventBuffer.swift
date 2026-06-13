@@ -33,6 +33,10 @@ actor EventBuffer {
     // Termination signals queued during the run.
     private var platformFinishes: [(platform: String, exitCode: Int32)] = []
     private var allFinished: Bool = false
+    // Per-job finishes for the individual (per-repo --only) lane. Kept
+    // separate from allFinished so one individual finishing never signals
+    // "the whole run is done" and tears down the others.
+    private var individualFinishes: [(id: RepoID, exitCode: Int32)] = []
 
     struct WorkerPhaseSnapshot: Sendable {
         let platform: String
@@ -47,10 +51,11 @@ actor EventBuffer {
         let logs: [(platform: String, line: String)]
         let finishes: [(platform: String, exitCode: Int32)]
         let allFinished: Bool
+        let individualFinishes: [(id: RepoID, exitCode: Int32)]
 
         var isEmpty: Bool {
             events.isEmpty && latestPhases.isEmpty && logs.isEmpty
-                && finishes.isEmpty && !allFinished
+                && finishes.isEmpty && !allFinished && individualFinishes.isEmpty
         }
     }
 
@@ -80,19 +85,25 @@ actor EventBuffer {
         allFinished = true
     }
 
+    func pushIndividualFinish(_ id: RepoID, exitCode: Int32) {
+        individualFinishes.append((id: id, exitCode: exitCode))
+    }
+
     func drainAndClear() -> Batch {
         let snapshot = Batch(
             events: events,
             latestPhases: Array(latestPhase.values),
             logs: logLines,
             finishes: platformFinishes,
-            allFinished: allFinished
+            allFinished: allFinished,
+            individualFinishes: individualFinishes
         )
         events.removeAll(keepingCapacity: true)
         latestPhase.removeAll(keepingCapacity: true)
         logLines.removeAll(keepingCapacity: true)
         platformFinishes.removeAll(keepingCapacity: true)
         allFinished = false
+        individualFinishes.removeAll(keepingCapacity: true)
         return snapshot
     }
 }

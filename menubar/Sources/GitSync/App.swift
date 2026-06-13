@@ -26,6 +26,9 @@ struct GitSyncApp: App {
         if args.contains("--trash-test") {
             exit(TrashTest.run())
         }
+        if args.contains("--concurrency-test") {
+            exit(ConcurrencyTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the
@@ -111,12 +114,14 @@ struct GitSyncApp: App {
         @StateObject private var spin = SpinDriver()
 
         var body: some View {
-            Image(systemName: state.isRunning
+            // anyActivity, not isRunning: the icon must animate for individual
+            // per-repo syncs too, not only full runs.
+            Image(systemName: state.anyActivity
                   ? SpinDriver.frames[spin.frame]
                   : state.menuBarIconName)
                 .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
-                .onAppear { spin.setRunning(state.isRunning) }
-                .onChange(of: state.isRunning) { _, running in
+                .onAppear { spin.setRunning(state.anyActivity) }
+                .onChange(of: state.anyActivity) { _, running in
                     spin.setRunning(running)
                 }
         }

@@ -26,7 +26,9 @@ struct MenuContent: View {
         Button("Run now") {
             state.startRun()
         }
-        .disabled(state.isRunning)
+        // A full run can't start while a full run OR any individual sync is
+        // in flight (rule 1).
+        .disabled(state.anyActivity)
         .keyboardShortcut("r", modifiers: .command)
 
         Button("Dismiss notification") {

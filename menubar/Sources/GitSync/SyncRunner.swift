@@ -18,8 +18,16 @@ import Foundation
 //   drains in batches.
 
 actor SyncRunner {
+    // Full-run lane: the three platform scripts, keyed by platform name.
+    // markAllFinished()/allFinished and the RunRecord belong to this lane
+    // ONLY.
     private var processes: [String: Process] = [:]
     private var pending = Set<String>()
+    // Individual lane: per-repo --only syncs, keyed by RepoID so any number
+    // run in parallel without colliding (different repos = disjoint .git
+    // dirs = safe). Keying by RepoID rather than platform is what lets two
+    // same-platform individual syncs coexist.
+    private var individualProcesses: [RepoID: Process] = [:]
     private var settings: SyncSettings
     private let buffer: EventBuffer
 
@@ -32,10 +40,17 @@ actor SyncRunner {
         self.settings = settings
     }
 
-    var isRunning: Bool { !pending.isEmpty }
+    // True while a full run OR any individual sync is in flight. Retained
+    // as the catch-all; the two lanes also expose their own predicates.
+    var isRunning: Bool { !pending.isEmpty || !individualProcesses.isEmpty }
+    var fullRunActive: Bool { !pending.isEmpty }
+    var individualActive: Bool { !individualProcesses.isEmpty }
 
-    // Kicks off a fresh run across all three platforms. No-op if a run is
-    // already in flight.
+    // Kicks off a fresh run across all three platforms. No-op if a full run
+    // OR any individual sync is already in flight — this is the authoritative
+    // gate for full-run exclusivity (rule 1). Checking individualProcesses
+    // here (not just pending) closes the TOCTOU where a scheduler-fired full
+    // run could otherwise race an in-flight individual onto the same repo.
     func startRun() async {
         guard !isRunning else { return }
         for platform in Platform.allCases {
@@ -57,43 +72,57 @@ actor SyncRunner {
         }
     }
 
-    // Kicks off a one-platform run with extra args (used for per-repo
-    // --only <rel> syncs from the Repositories view). No-op if any run
-    // is already in flight; caller should cancel or wait.
-    func runSinglePlatform(platform: Platform, extraArgs: [String]) async {
-        guard !isRunning else { return }
+    // Kicks off a single-repo --only sync (from the Repositories view).
+    // Runs in parallel with other individual syncs; refused only if a full
+    // run is active (rule 1) or this exact repo is already syncing (rule 3).
+    //
+    // CRITICAL: every early-return path pushes an individual-finish for `id`.
+    // AppState inserts `id` into syncingRepos synchronously before awaiting
+    // this call, so a bare `return` would leave the row (and the menu-bar
+    // icon) spinning forever and permanently block the next full run. The
+    // finish event is what drains syncingRepos.
+    func runIndividual(id: RepoID, extraArgs: [String]) async {
+        func bail(_ reason: String) async {
+            await buffer.pushLogLine(reason, platform: id.platform)
+            await buffer.pushIndividualFinish(id, exitCode: -1)
+        }
+        guard pending.isEmpty else {
+            return await bail("skipped \(id.rel): a full sync is running")
+        }
+        guard individualProcesses[id] == nil else {
+            return await bail("skipped \(id.rel): already syncing")
+        }
+        guard let platform = Platform(rawValue: id.platform) else {
+            return await bail("skipped \(id.rel): unknown platform \(id.platform)")
+        }
         do {
-            try spawn(platform: platform, extraArgs: extraArgs)
-            pending.insert(platform.rawValue)
+            try spawn(platform: platform, extraArgs: extraArgs, individual: id)
         } catch {
-            await buffer.pushLogLine(
-                "failed to spawn \(platform.rawValue): \(error)",
-                platform: platform.rawValue
-            )
-            await buffer.pushPlatformFinish(platform.rawValue, exitCode: -1)
-            await buffer.markAllFinished()
+            await bail("failed to spawn \(id.rel): \(error)")
         }
     }
 
-    // Best-effort cancel. SIGTERM gives the scripts a chance to clean up;
-    // a follow-up SIGKILL after 5s ensures we don't leak processes if a
-    // child is stuck in a syscall.
+    // Best-effort cancel of everything in flight (both lanes). SIGTERM gives
+    // the scripts a chance to clean up; a follow-up SIGKILL after 5s ensures
+    // we don't leak processes if a child is stuck in a syscall.
     func cancel() {
-        for (_, process) in processes where process.isRunning {
-            process.terminate()
+        for p in allProcesses() where p.isRunning {
+            p.terminate()
         }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
-            guard let snapshot = await self?.snapshotProcesses() else { return }
-            for (_, process) in snapshot where process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
+            guard let snapshot = await self?.allProcesses() else { return }
+            for p in snapshot where p.isRunning {
+                kill(p.processIdentifier, SIGKILL)
             }
         }
     }
 
-    private func snapshotProcesses() -> [String: Process] { processes }
+    private func allProcesses() -> [Process] {
+        Array(processes.values) + Array(individualProcesses.values)
+    }
 
-    private func spawn(platform: Platform, extraArgs: [String]) throws {
+    private func spawn(platform: Platform, extraArgs: [String], individual: RepoID? = nil) throws {
         let script = settings.scriptsDirectory.appendingPathComponent(platform.scriptName)
         guard FileManager.default.isReadableFile(atPath: script.path) else {
             throw RunnerError.scriptNotFound(script.path)
@@ -120,13 +149,22 @@ actor SyncRunner {
         let platformName = platform.rawValue
         process.terminationHandler = { [weak self] proc in
             guard let self else { return }
+            let code = proc.terminationStatus
             Task {
-                await self.handleTermination(platform: platformName, exitCode: proc.terminationStatus)
+                if let id = individual {
+                    await self.handleIndividualTermination(id: id, exitCode: code)
+                } else {
+                    await self.handleTermination(platform: platformName, exitCode: code)
+                }
             }
         }
 
         try process.run()
-        processes[platformName] = process
+        if let id = individual {
+            individualProcesses[id] = process
+        } else {
+            processes[platformName] = process
+        }
 
         // Drain stdout and stderr via readabilityHandler. We deliberately
         // avoid FileHandle.AsyncBytes / .lines here: that path stalled on
@@ -213,6 +251,15 @@ actor SyncRunner {
         if pending.isEmpty {
             await buffer.markAllFinished()
         }
+    }
+
+    // Per-job teardown for the individual lane. Crucially it does NOT call
+    // markAllFinished() — that flag is the full run's completion signal, and
+    // tripping it here would tear down any other in-flight individual jobs.
+    // Each individual finishes independently via its own pushIndividualFinish.
+    private func handleIndividualTermination(id: RepoID, exitCode: Int32) async {
+        individualProcesses.removeValue(forKey: id)
+        await buffer.pushIndividualFinish(id, exitCode: exitCode)
     }
 
     private func baseEnvironment() -> [String: String] {

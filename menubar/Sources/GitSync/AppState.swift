@@ -10,12 +10,23 @@ final class AppState: ObservableObject {
     // each value maps `rel` (repo path under the platform root) to its
     // current phase + percentage. Empty between runs.
     @Published var activeWorkers: [String: [String: WorkerView]] = [:]
+    // Repos with an individual (--only) sync in flight. Drives the per-row
+    // spinner and the per-row button disable. Many can be present at once;
+    // they run in parallel. A full run and individual syncs are mutually
+    // exclusive (see startRun / syncRepo guards), so this is empty whenever
+    // currentRun != nil and vice versa.
+    @Published var syncingRepos: Set<RepoID> = []
 
     private let settingsStore: SettingsStore
     private let history: HistoryStore
     let inventory: InventoryStore
     let eventBuffer = EventBuffer()
     private var drainTimer: Timer?
+    // Reference count for the shared 10Hz drain timer. The full run and each
+    // individual sync each retain it once and release once, so the timer
+    // stays alive while ANY job is active and stops only when all are done —
+    // the first individual to finish must not stop the timer for the others.
+    private var drainRetain = 0
     private(set) lazy var runner: SyncRunner = SyncRunner(
         settings: settingsStore.currentSyncSettings,
         eventBuffer: eventBuffer
@@ -34,7 +45,16 @@ final class AppState: ObservableObject {
         scheduler.reschedule()
     }
 
+    // isRunning means specifically "a full run is active" — it drives the
+    // Running…/last-run summary and the Cancel-run item, which are full-run
+    // concepts. Individual syncs deliberately don't show there (rule 5).
     var isRunning: Bool { currentRun != nil }
+
+    // True while a full run OR any individual sync is in flight. Drives the
+    // menu-bar icon (so it spins for per-repo syncs too) and the drain timer.
+    var anyActivity: Bool { currentRun != nil || !syncingRepos.isEmpty }
+
+    func isSyncing(_ id: RepoID) -> Bool { syncingRepos.contains(id) }
 
     var anomalyCount: Int {
         (lastRun?.outcomes ?? []).filter(\.status.isAnomaly).count
@@ -46,7 +66,7 @@ final class AppState: ObservableObject {
     }
 
     var menuBarIconName: String {
-        if isRunning      { return "arrow.triangle.2.circlepath" }
+        if anyActivity    { return "arrow.triangle.2.circlepath" }
         if showsAttention { return "exclamationmark.triangle.fill" }
         return "arrow.triangle.2.circlepath"
     }
@@ -56,11 +76,14 @@ final class AppState: ObservableObject {
     }
 
     func startRun() {
-        guard !isRunning else { return }
+        // Full run is exclusive: refuse if a full run OR any individual sync
+        // is already in flight (rule 1). The runner enforces this again as
+        // the authoritative gate; this is the UI-side mirror.
+        guard currentRun == nil, syncingRepos.isEmpty else { return }
         currentRun = RunRecord()
         dismissedRunID = nil
         activeWorkers = [:]
-        startDrainTimer()
+        retainDrainTimer()
         let snapshot = settingsStore.currentSyncSettings
         Task {
             await runner.updateSettings(snapshot)
@@ -93,21 +116,26 @@ final class AppState: ObservableObject {
         return report
     }
 
-    // Per-repo sync triggered from the Repositories view's "Sync this
-    // repo" action. Refuses if a run is already in flight (the menu
-    // disables the action while isRunning is true). Translates the
-    // RepoID into a single-platform spawn with the --only <rel> flag.
+    // Per-repo sync triggered from the Repositories view's "Sync this repo"
+    // action. Runs in parallel with other individual syncs (different repos
+    // = disjoint .git dirs = safe). Refused only if a full run is active
+    // (rule 1) or this exact repo is already syncing (rule 3). Does NOT
+    // create a RunRecord or touch history/last-run — individual results land
+    // in the inventory only (rule 5).
     func syncRepo(_ id: RepoID) {
-        guard !isRunning else { return }
-        guard let platform = Platform(rawValue: id.platform) else { return }
-        currentRun = RunRecord()
-        dismissedRunID = nil
-        activeWorkers = [:]
-        startDrainTimer()
+        guard currentRun == nil else { return }
+        guard !syncingRepos.contains(id) else { return }
+        guard Platform(rawValue: id.platform) != nil else { return }
+        // Mark busy synchronously (before the await) so the row spins on the
+        // very next render and a second click is rejected immediately. The
+        // runner pushes an individual-finish on every early-return path, so
+        // this always drains back out — no stuck spinner.
+        syncingRepos.insert(id)
+        retainDrainTimer()
         let snapshot = settingsStore.currentSyncSettings
         Task {
             await runner.updateSettings(snapshot)
-            await runner.runSinglePlatform(platform: platform, extraArgs: ["--only", id.rel])
+            await runner.runIndividual(id: id, extraArgs: ["--only", id.rel])
         }
     }
 
@@ -119,8 +147,13 @@ final class AppState: ObservableObject {
     // blocks on UI work — if the UI can't keep up, events coalesce in
     // the buffer rather than backing up in the Python's stdout pipe.
 
-    private func startDrainTimer() {
-        drainTimer?.invalidate()
+    // Ref-counted so a full run and N individual syncs share ONE timer.
+    // Retain when a job starts, release when it finishes; the timer lives
+    // while the count is positive and stops only at zero. Never invalidates
+    // a live timer (which would steal it from a concurrent job).
+    private func retainDrainTimer() {
+        drainRetain += 1
+        guard drainTimer == nil else { return }
         // .common run-loop mode, not .default: menu tracking pauses
         // .default-mode timers, which would freeze the live progress shown
         // in the open menu (and back events up) for as long as it's open.
@@ -131,7 +164,9 @@ final class AppState: ObservableObject {
         drainTimer = timer
     }
 
-    private func stopDrainTimer() {
+    private func releaseDrainTimer() {
+        drainRetain = max(0, drainRetain - 1)
+        guard drainRetain == 0 else { return }
         drainTimer?.invalidate()
         drainTimer = nil
     }
@@ -166,14 +201,23 @@ final class AppState: ObservableObject {
             }
             currentRun = run
         }
-        // Per-platform terminations + activeWorkers cleanup.
+        // Per-platform terminations + activeWorkers cleanup (full-run lane).
         for finish in batch.finishes {
             currentRun?.exitCodes[finish.platform] = finish.exitCode
             activeWorkers[finish.platform] = nil
         }
-        // All-platforms-done finalizer.
+        // All-platforms-done finalizer (full-run lane).
         if batch.allFinished {
             finalizeRun()
+        }
+        // Individual-lane terminations. Each finishing repo drops out of the
+        // busy set (stopping its row's spinner) and releases the timer it
+        // retained. Its outcome already updated the inventory via .outcome
+        // above; no RunRecord/history is involved (rule 5).
+        for finish in batch.individualFinishes {
+            if syncingRepos.remove(finish.id) != nil {
+                releaseDrainTimer()
+            }
         }
     }
 
@@ -184,7 +228,7 @@ final class AppState: ObservableObject {
         currentRun = nil
         activeWorkers = [:]
         history.record(run)
-        stopDrainTimer()
+        releaseDrainTimer()
     }
 
     private func apply(_ event: SyncEvent) {

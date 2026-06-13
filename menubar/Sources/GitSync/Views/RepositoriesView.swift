@@ -190,7 +190,7 @@ struct RepositoriesView: View {
     private func contextMenuItems(for ids: Set<RepoID>) -> some View {
         if ids.count == 1, let id = ids.first, let repo = inventory.repos[id] {
             Button("Sync this repo") { state.syncRepo(id) }
-                .disabled(state.isRunning)
+                .disabled(state.isRunning || state.isSyncing(id))
             Button("Reveal in Finder") { RepoActions.reveal(repo: repo, settings: settings) }
             if !repo.sshURL.isEmpty {
                 Button("Copy SSH URL") {
@@ -336,11 +336,21 @@ private struct RepoRow: View {
                 Button {
                     state.syncRepo(repo.id)
                 } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
+                    // Spin THIS repo's button while it's syncing, instead of
+                    // greying everything: other repos stay clickable so you
+                    // can fire off several in parallel.
+                    if state.isSyncing(repo.id) {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
                 }
                 .buttonStyle(.borderless)
-                .help(state.isRunning ? "A sync is already running" : "Sync this repo")
-                .disabled(state.isRunning)
+                .help(syncButtonHelp)
+                // Disabled only when a full run is active (individual syncs
+                // are locked out then) or this exact repo is already syncing.
+                .disabled(state.isRunning || state.isSyncing(repo.id))
 
                 Button {
                     addToSkipList()
@@ -377,6 +387,12 @@ private struct RepoRow: View {
         .background(repo.effectiveStatus.color.opacity(0.15))
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .help(repo.effectiveStatus.explanation)
+    }
+
+    private var syncButtonHelp: String {
+        if state.isRunning { return "A full sync is running" }
+        if state.isSyncing(repo.id) { return "Syncing…" }
+        return "Sync this repo"
     }
 
     private var isInSkipList: Bool {
