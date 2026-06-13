@@ -33,6 +33,9 @@ struct GitSyncApp: App {
             let dir = args.index(after: i) < args.endIndex ? args[args.index(after: i)] : ""
             exit(DiffEngineMode.run(dir: dir))
         }
+        if args.contains("--engine-sync") {
+            exit(EngineSyncMode.run(args: Array(args)))
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the

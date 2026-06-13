@@ -256,9 +256,30 @@ enum RepoSyncer {
     }
 
     private static func safeUnderRoot(_ dest: URL, _ root: URL) -> Bool {
-        let d = dest.standardizedFileURL.resolvingSymlinksInPath().path
+        // dest may not exist yet (clone path), so resolvingSymlinksInPath on
+        // it is unreliable. Resolve the deepest EXISTING ancestor for symlink
+        // safety, then re-append the non-existent tail — equivalent in intent
+        // to Python's dest.resolve().relative_to(SYNC_ROOT.resolve()).
         let r = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let d = resolvedExistingPrefix(dest).path
         return d == r || d.hasPrefix(r + "/")
+    }
+
+    // Resolve symlinks on the deepest existing ancestor of `url`, then append
+    // the remaining (non-existent) path components.
+    private static func resolvedExistingPrefix(_ url: URL) -> URL {
+        let fm = FileManager.default
+        var existing = url.standardizedFileURL
+        var tail: [String] = []
+        while !fm.fileExists(atPath: existing.path) {
+            tail.insert(existing.lastPathComponent, at: 0)
+            let parent = existing.deletingLastPathComponent()
+            if parent.path == existing.path { break }  // reached root
+            existing = parent
+        }
+        var resolved = existing.resolvingSymlinksInPath()
+        for comp in tail { resolved.appendPathComponent(comp) }
+        return resolved.standardizedFileURL
     }
 
     private static func tail(_ s: String, _ n: Int = 20) -> String {

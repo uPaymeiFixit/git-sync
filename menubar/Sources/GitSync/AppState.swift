@@ -31,6 +31,17 @@ final class AppState: ObservableObject {
         settings: settingsStore.currentSyncSettings,
         eventBuffer: eventBuffer
     )
+    // Native Swift sync engine — replaces the Python+pipe. Feeds the SAME
+    // EventBuffer via BufferSink, so the drain timer / two-lane / finalize
+    // logic below is unchanged. The engine is the default; set
+    // GIT_SYNC_USE_PYTHON=1 in the environment to fall back to the legacy
+    // SyncRunner during the transition.
+    private(set) lazy var engine: SyncEngine = SyncEngine(
+        settings: settingsStore.currentSyncSettings,
+        sink: BufferSink(buffer: eventBuffer)
+    )
+    private let useNativeEngine =
+        ProcessInfo.processInfo.environment["GIT_SYNC_USE_PYTHON"] != "1"
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
 
     init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore) {
@@ -85,14 +96,25 @@ final class AppState: ObservableObject {
         activeWorkers = [:]
         retainDrainTimer()
         let snapshot = settingsStore.currentSyncSettings
-        Task {
-            await runner.updateSettings(snapshot)
-            await runner.startRun()
+        if useNativeEngine {
+            Task {
+                await engine.updateSettings(snapshot)
+                await engine.startFullRun()
+            }
+        } else {
+            Task {
+                await runner.updateSettings(snapshot)
+                await runner.startRun()
+            }
         }
     }
 
     func cancelRun() {
-        Task { await runner.cancel() }
+        if useNativeEngine {
+            Task { await engine.cancel() }
+        } else {
+            Task { await runner.cancel() }
+        }
     }
 
     // Move the local clones of the given repos to the Trash, after the
@@ -133,9 +155,21 @@ final class AppState: ObservableObject {
         syncingRepos.insert(id)
         retainDrainTimer()
         let snapshot = settingsStore.currentSyncSettings
-        Task {
-            await runner.updateSettings(snapshot)
-            await runner.runIndividual(id: id, extraArgs: ["--only", id.rel])
+        if useNativeEngine {
+            // Pass known ssh/branch from the inventory so the engine can skip
+            // even the single discoverOne API call when we already have them.
+            let repo = inventory.repos[id]
+            let ssh = repo?.sshURL
+            let branch = repo?.defaultBranch
+            Task {
+                await engine.updateSettings(snapshot)
+                await engine.syncRepo(id, sshURL: ssh, branch: branch)
+            }
+        } else {
+            Task {
+                await runner.updateSettings(snapshot)
+                await runner.runIndividual(id: id, extraArgs: ["--only", id.rel])
+            }
         }
     }
 
