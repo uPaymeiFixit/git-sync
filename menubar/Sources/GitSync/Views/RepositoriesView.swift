@@ -22,10 +22,20 @@ struct RepositoriesView: View {
     @State private var trashSummary: String?
 
     var body: some View {
+        // The filter → group → sort pipeline is O(N log N) over ~2,000
+        // repos. Hoist it so each body evaluation runs it exactly once —
+        // referencing the computed property inside the per-status ForEach
+        // used to re-run the whole pipeline once per status section (14×),
+        // which made the window visibly sluggish whenever state changed
+        // (selection clicks, search keystrokes, 10Hz inventory updates
+        // during a sync).
+        let groups = groupedFiltered
+        let visibleCount = groups.values.reduce(0) { $0 + $1.count }
+        let chipCounts = countByStatus
         VStack(spacing: 0) {
-            toolbar
+            toolbar(visibleCount: visibleCount, chipCounts: chipCounts)
             Divider()
-            if filteredRepos.isEmpty {
+            if visibleCount == 0 {
                 ContentUnavailableView(
                     inventory.repos.isEmpty ? "No repositories yet" : "Nothing matches",
                     systemImage: inventory.repos.isEmpty
@@ -36,7 +46,7 @@ struct RepositoriesView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                repoList
+                repoList(groups: groups)
             }
         }
         .frame(minWidth: 820, minHeight: 540)
@@ -45,7 +55,7 @@ struct RepositoriesView: View {
 
     // MARK: - Toolbar (search + filters)
 
-    private var toolbar: some View {
+    private func toolbar(visibleCount: Int, chipCounts: [SyncStatus: Int]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -60,14 +70,14 @@ struct RepositoriesView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Text("\(filteredRepos.count) of \(inventory.repos.count)")
+                Text("\(visibleCount) of \(inventory.repos.count)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
             HStack(spacing: 8) {
                 ForEach(statusOrder, id: \.self) { status in
-                    let count = countByStatus[status] ?? 0
+                    let count = chipCounts[status] ?? 0
                     if count > 0 {
                         FilterChip(
                             label: status.displayName,
@@ -94,10 +104,10 @@ struct RepositoriesView: View {
 
     // MARK: - Repo list
 
-    private var repoList: some View {
+    private func repoList(groups: [SyncStatus: [Repo]]) -> some View {
         List(selection: $selection) {
             ForEach(statusOrder, id: \.self) { status in
-                let group = groupedFiltered[status] ?? []
+                let group = groups[status] ?? []
                 if !group.isEmpty {
                     Section {
                         if !collapsedSections.contains(status) {
