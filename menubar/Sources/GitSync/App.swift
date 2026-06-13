@@ -29,6 +29,10 @@ struct GitSyncApp: App {
         if args.contains("--concurrency-test") {
             exit(ConcurrencyTest.run())
         }
+        if let i = args.firstIndex(of: "--diff-engine") {
+            let dir = args.index(after: i) < args.endIndex ? args[args.index(after: i)] : ""
+            exit(DiffEngineMode.run(dir: dir))
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the
