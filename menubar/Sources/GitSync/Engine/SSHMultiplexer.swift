@@ -139,8 +139,15 @@ struct SSHMultiplexer: Sendable {
             p.standardInput = FileHandle.nullDevice
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
-            try? p.run()
-            p.waitUntilExit()
+            do { try p.run() } catch { continue }
+            // Bound the wait (Python uses timeout=5): a wedged control socket
+            // must not stall run completion, since cleanup runs in a defer on
+            // the run-finish path.
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { p.waitUntilExit(); done.signal() }
+            if done.wait(timeout: .now() + 5) == .timedOut, p.isRunning {
+                p.terminate()
+            }
         }
         try? FileManager.default.removeItem(at: controlDir)
     }

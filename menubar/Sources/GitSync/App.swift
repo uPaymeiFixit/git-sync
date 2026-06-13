@@ -36,6 +36,9 @@ struct GitSyncApp: App {
         if args.contains("--engine-sync") {
             exit(EngineSyncMode.run(args: Array(args)))
         }
+        if args.contains("--abort-reset-test") {
+            exit(AbortResetTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the

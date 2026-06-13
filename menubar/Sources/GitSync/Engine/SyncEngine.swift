@@ -80,6 +80,15 @@ actor SyncEngine {
     func syncRepo(_ id: RepoID, sshURL: String?, branch: String?) {
         guard !fullRunActive else { return }            // rule 1
         guard !individualRepos.contains(id) else { return }  // rule 3 dedupe
+        // Clear a stale abort flag from a PREVIOUS cancelled run before
+        // starting fresh work. abortBox lives on the long-lived engine
+        // singleton, so without this a cancel would poison every later
+        // individual sync (they'd all return "aborted" without doing any
+        // git work). Only safe to reset when nothing else is in flight.
+        if individualRepos.isEmpty {
+            aborted = false
+            abortBox.reset()
+        }
         individualRepos.insert(id)
         let task = Task { [weak self] in
             guard let self else { return }

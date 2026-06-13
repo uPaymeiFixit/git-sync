@@ -223,7 +223,17 @@ enum RepoSyncer {
         GitRunner.git(path, "rev-parse", "--verify", "refs/remotes/origin/\(branch)", env: ctx.makeEnv()).code == 0
     }
     private static func remoteHasNoRefs(_ path: String, _ ctx: GitContext) -> Bool {
-        let r = GitRunner.git(path, "ls-remote", "--quiet", "origin", env: ctx.makeEnv())
+        // ls-remote is the only NETWORK query routed through the non-streaming
+        // runner (which reads to EOF). Force ControlMaster=no so it can't spawn
+        // or attach a persistent ssh master that would hold the pipe write-end
+        // open for ControlPersist seconds after ls-remote itself exits — that
+        // would block the EOF read. (The streaming clone/fetch path tolerates
+        // the master fine; this one-shot does not.)
+        var env = ctx.makeEnv()
+        if let ssh = env["GIT_SSH_COMMAND"] {
+            env["GIT_SSH_COMMAND"] = ssh + " -o ControlMaster=no"
+        }
+        let r = GitRunner.git(path, "ls-remote", "--quiet", "origin", env: env)
         return r.code == 0 && r.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private static func isDirty(_ path: String, _ ctx: GitContext) -> Bool {
