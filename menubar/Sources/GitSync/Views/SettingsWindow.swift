@@ -51,7 +51,7 @@ private struct PlatformsTab: View {
                                    value: $settings.gitlabToken,
                                    prompt: "glpat-…",
                                    generateURL: gitlabTokenURL())
-                Text("Token stored in Keychain. Needs `read_api` and `read_repository` scopes. If left blank, the bundled glab falls back to your existing `glab auth login` config (if any).")
+                Text("Token stored in Keychain. Needs `read_api` and `read_repository` scopes. Required — GitLab discovery uses the API directly.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

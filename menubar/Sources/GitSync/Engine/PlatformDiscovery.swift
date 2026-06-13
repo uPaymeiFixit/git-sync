@@ -43,118 +43,81 @@ struct SkipMatcher: Sendable {
     }
 }
 
-// ---- GitLab: shells `glab` via GitRunner (preserves the bundled-glab auth
-// story — GITLAB_TOKEN env or glab config). Port of sync-gitlab.py. ----
-
-struct GlabError: Error { let message: String }
+// ---- GitLab: direct REST via URLSession + PRIVATE-TOKEN, consistent with
+// the GitHub/Bitbucket clients. Replaces the old `glab` shell-out — no
+// bundled binary, no PATH fragility. Auth is the GitLab token from Settings
+// (Keychain → GITLAB_TOKEN). ----
 
 struct GitLabClient: PlatformDiscovery {
     let platform = Platform.gitlab
-    let host: String
+    let host: String           // e.g. "gitlabdev.paciolan.info" (no scheme)
+    let token: String          // PRIVATE-TOKEN
     let includeArchived: Bool
     let syncRoot: URL
-    let env: [String: String]   // includes GITLAB_TOKEN if set, PATH with bundled glab
 
+    private var apiBase: String { "https://\(host)/api/v4" }
     private var platformRoot: URL { syncRoot.appendingPathComponent("Gitlab") }
-
-    // Transient glab error substrings → retry. Port of _RETRYABLE_PATTERNS.
-    private static let retryable = [
-        "no route to host", "connection refused", "connection reset",
-        "i/o timeout", "tls handshake timeout", "eof",
-        "temporary failure in name resolution", "502", "503", "504",
-    ]
-    private func isRetryable(_ stderr: String) -> Bool {
-        let l = stderr.lowercased()
-        return Self.retryable.contains { l.contains($0) }
-    }
-
-    // One `glab api` call with retry on transient failures. Port of
-    // _glab_api_single. Returns decoded JSON or a failure message.
-    private func glabAPISingle(_ path: String, attempts: Int = 4) -> Result<Any, GlabError> {
-        var delay = 2.0
-        var lastErr = ""
-        for attempt in 1...attempts {
-            let r = GitRunner.gitRawProgram(
-                "glab", ["api", "--hostname", host, path], env: env)
-            if r.code == 0 {
-                guard let data = r.out.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data) else {
-                    return .failure(GlabError(message: "glab api \(path): unparseable JSON"))
-                }
-                return .success(json)
-            }
-            lastErr = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if attempt >= attempts || !isRetryable(lastErr) {
-                return .failure(GlabError(message: "glab api \(path) failed: \(lastErr)"))
-            }
-            Thread.sleep(forTimeInterval: delay * Double.random(in: 0.5...1.5))
-            delay *= 2
-        }
-        return .failure(GlabError(message: "glab api \(path) failed: \(lastErr)"))
-    }
-
-    // Manual pagination — append &page=N until a short/empty page. Port of
-    // glab_api (paginate=true). --paginate concatenates unparseable arrays,
-    // so we page by hand.
-    private func glabAPIPaginated(_ path: String, perPage: Int) -> Result<[Any], GlabError> {
-        let sep = path.contains("?") ? "&" : "?"
-        var page = 1
-        var merged: [Any] = []
-        while true {
-            switch glabAPISingle("\(path)\(sep)page=\(page)") {
-            case .failure(let e): return .failure(e)
-            case .success(let json):
-                guard let chunk = json as? [Any] else {
-                    // Non-list endpoint — return as-is wrapped.
-                    return .success([json])
-                }
-                if chunk.isEmpty { return .success(merged) }
-                merged.append(contentsOf: chunk)
-                if chunk.count < perPage { return .success(merged) }
-                page += 1
-            }
-        }
-    }
+    private let accept = "application/json"
+    private var headers: [String: String] { ["PRIVATE-TOKEN": token] }
 
     func discoverAll(skip: SkipMatcher) -> DiscoveryResult {
         var result = DiscoveryResult()
+        var seen = Set<String>()
+        // min_access_level=10 (Guest+ = member); simple=true trims payload.
         let archivedQS = includeArchived ? "" : "&archived=false"
-        let path = "projects?min_access_level=10\(archivedQS)&simple=true&per_page=100"
-        switch glabAPIPaginated(path, perPage: 100) {
-        case .failure(let e):
-            result.fatalError = e.message
-            return result
-        case .success(let projects):
-            var seen = Set<String>()
-            for case let p as [String: Any] in projects {
+        var next: URL? = URL(string:
+            "\(apiBase)/projects?min_access_level=10\(archivedQS)&simple=true&per_page=100&page=1")
+        while let url = next {
+            let resp: (status: Int, body: Data, link: String)
+            do {
+                resp = try HTTPClient.get(url, headers: headers, accept: accept)
+            } catch {
+                result.fatalError = "GitLab discovery: \(error.localizedDescription)"
+                return result
+            }
+            guard let arr = try? JSONSerialization.jsonObject(with: resp.body) as? [[String: Any]] else {
+                result.fatalError = "GitLab discovery: unparseable page"
+                return result
+            }
+            for p in arr {
                 guard let branch = p["default_branch"] as? String, !branch.isEmpty,
-                      let url = p["ssh_url_to_repo"] as? String, !url.isEmpty,
-                      let pathNS = p["path_with_namespace"] as? String, !pathNS.isEmpty
-                else { continue }
-                if seen.contains(url) { continue }
-                seen.insert(url)
+                      let sshURL = p["ssh_url_to_repo"] as? String, !sshURL.isEmpty,
+                      let pathNS = p["path_with_namespace"] as? String, !pathNS.isEmpty,
+                      !seen.contains(sshURL) else { continue }
+                seen.insert(sshURL)
                 let dest = platformRoot.appendingPathComponent(pathNS)
                 result.repos.append(DiscoveredRepo(
-                    rel: rel(dest), sshURL: url, defaultBranch: branch, namespacePath: pathNS))
+                    rel: rel(dest), sshURL: sshURL, defaultBranch: branch, namespacePath: pathNS))
             }
-            return result
+            // GitLab sends RFC5988 Link headers with rel="next".
+            next = parseNextLink(resp.link)
         }
+        return result
     }
 
     func discoverOne(rel target: String) -> DiscoveredRepo? {
+        // Strip the "Gitlab/" prefix, URL-encode the namespace path (slashes
+        // become %2F) for GET /projects/:url-encoded-path.
         let ns = target.contains("/") ? String(target.drop(while: { $0 != "/" }).dropFirst()) : target
-        guard let enc = ns.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
-        switch glabAPISingle("projects/\(enc)") {
-        case .failure: return nil
-        case .success(let json):
-            guard let p = json as? [String: Any],
-                  let branch = p["default_branch"] as? String, !branch.isEmpty,
-                  let url = p["ssh_url_to_repo"] as? String, !url.isEmpty,
-                  let pathNS = p["path_with_namespace"] as? String, !pathNS.isEmpty
-            else { return nil }
-            let dest = platformRoot.appendingPathComponent(pathNS)
-            return DiscoveredRepo(rel: rel(dest), sshURL: url, defaultBranch: branch, namespacePath: pathNS)
-        }
+        guard let enc = ns.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+              let url = URL(string: "\(apiBase)/projects/\(enc)") else { return nil }
+        guard let resp = try? HTTPClient.get(url, headers: headers, accept: accept),
+              let p = try? JSONSerialization.jsonObject(with: resp.body) as? [String: Any],
+              let branch = p["default_branch"] as? String, !branch.isEmpty,
+              let sshURL = p["ssh_url_to_repo"] as? String, !sshURL.isEmpty,
+              let pathNS = p["path_with_namespace"] as? String, !pathNS.isEmpty
+        else { return nil }
+        let dest = platformRoot.appendingPathComponent(pathNS)
+        return DiscoveredRepo(rel: rel(dest), sshURL: sshURL, defaultBranch: branch, namespacePath: pathNS)
+    }
+
+    private func parseNextLink(_ header: String) -> URL? {
+        guard !header.isEmpty,
+              let r = header.range(of: #"<([^>]+)>;\s*rel="next""#, options: .regularExpression)
+        else { return nil }
+        let seg = String(header[r])
+        guard let lt = seg.firstIndex(of: "<"), let gt = seg.firstIndex(of: ">") else { return nil }
+        return URL(string: String(seg[seg.index(after: lt)..<gt]))
     }
 
     private func rel(_ dest: URL) -> String {

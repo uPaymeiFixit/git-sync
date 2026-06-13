@@ -129,8 +129,9 @@ actor SyncEngine {
         case .gitlab:
             return GitLabClient(
                 host: env["GITLAB_HOST"] ?? "",
+                token: env["GITLAB_TOKEN"] ?? "",
                 includeArchived: env["GIT_SYNC_INCLUDE_ARCHIVED"] != nil,
-                syncRoot: syncRoot, env: env)
+                syncRoot: syncRoot)
         case .github:
             return GitHubClient(
                 org: env["GIT_SYNC_GITHUB_ORG"] ?? "",
