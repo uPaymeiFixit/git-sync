@@ -125,7 +125,7 @@ final class SettingsStore: ObservableObject {
         self.skipGithub         = d.bool(forKey: DKey.skipGithub)
         self.includeArchived    = d.bool(forKey: DKey.includeArchived)
         self.skipPatterns       = d.string(forKey: DKey.skipPatterns) ?? ""
-        self.parallel           = d.object(forKey: DKey.parallel) as? Int ?? 8
+        self.parallel           = d.object(forKey: DKey.parallel) as? Int ?? 128
         self.timeout            = d.object(forKey: DKey.timeout) as? Int ?? 1800
         self.depth              = d.object(forKey: DKey.depth) as? Int ?? 100
         self.scheduleMode       = ScheduleMode(rawValue: d.string(forKey: DKey.scheduleMode) ?? "")

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "GitSync",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],   // Synchronization.Atomic (AbortBox) needs 15+
     targets: [
         .executableTarget(
             name: "GitSync",

@@ -42,6 +42,9 @@ struct GitSyncApp: App {
         if args.contains("--parallelism-test") {
             exit(ParallelismTest.run())
         }
+        if args.contains("--abort-contention-test") {
+            exit(AbortContentionTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the

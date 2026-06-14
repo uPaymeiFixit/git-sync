@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 // The native sync engine — replaces SyncRunner. Drives git directly (no
 // Python, no subprocess pipe). Owns:
@@ -56,7 +57,7 @@ actor SyncEngine {
     }
     private var depth: Int { Int(env["GIT_SYNC_DEPTH"] ?? "100") ?? 100 }
     private var timeout: TimeInterval { TimeInterval(Int(env["GIT_SYNC_TIMEOUT"] ?? "1800") ?? 1800) }
-    private var parallel: Int { Int(env["GIT_SYNC_PARALLEL"] ?? "8") ?? 8 }
+    private var parallel: Int { Int(env["GIT_SYNC_PARALLEL"] ?? "128") ?? 128 }
     private var skip: SkipMatcher { SkipMatcher(env["GIT_SYNC_SKIP"] ?? "") }
 
     // ---- Full run: all enabled platforms, exclusive ----
@@ -383,10 +384,15 @@ actor SyncEngine {
 
 // Thread-safe abort flag readable from the @Sendable progress/abort closures
 // without hopping back onto the actor.
+// A one-shot abort flag polled in tight per-chunk loops by every git worker.
+// MUST be lock-free: an NSLock here convoys all N pool threads on a single
+// pthread_mutex (every clone emits thousands of progress chunks, each taking
+// the lock), collapsing 128-way parallelism to crawling single-file lock
+// handoff. `Atomic<Bool>` reads compile to a plain load + acquire barrier —
+// no kernel call, no contention.
 final class AbortBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value = false
-    var value: Bool { lock.lock(); defer { lock.unlock() }; return _value }
-    func set() { lock.lock(); _value = true; lock.unlock() }
-    func reset() { lock.lock(); _value = false; lock.unlock() }
+    private let _value = Atomic<Bool>(false)
+    var value: Bool { _value.load(ordering: .acquiring) }
+    func set() { _value.store(true, ordering: .releasing) }
+    func reset() { _value.store(false, ordering: .releasing) }
 }
