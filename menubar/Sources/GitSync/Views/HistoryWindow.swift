@@ -62,8 +62,13 @@ private struct RunRow: View {
                     .font(.headline)
             }
             if isLive {
-                Text("\(run.outcomes.count) repo(s) so far")
+                Text(run.phaseLabel ?? "Starting…")
                     .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if run.outcomes.count > 0 {
+                    Text("\(run.outcomes.count) repo(s) done")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
             } else if let dur = duration {
                 Label(dur, systemImage: "clock")
                     .labelStyle(.titleAndIcon)
@@ -86,12 +91,17 @@ private struct RunRow: View {
 // the script actually print during that run" debugging. Header (date +
 // per-platform exit codes) + full-height scrollable log.
 private struct RunDetail: View {
+    @EnvironmentObject private var state: AppState
     let run: RunRecord
     var isLive: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
+            if isLive {
+                Divider()
+                LiveActivityPanel()
+            }
             Divider()
             logSection
         }
@@ -124,7 +134,7 @@ private struct RunDetail: View {
                 Text(run.startedAt.formatted(date: .complete, time: .shortened))
                     .font(.headline)
                 if isLive {
-                    Label("Running… \(run.outcomes.count) repo(s) so far",
+                    Label(run.phaseLabel ?? "Starting…",
                           systemImage: "arrow.triangle.2.circlepath")
                         .foregroundStyle(.secondary).font(.caption)
                 } else if let end = run.endedAt {
@@ -141,6 +151,98 @@ private struct RunDetail: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+// Live, per-repo activity for the in-flight run. Driven entirely by
+// state.activeWorkers (populated by workerStart/workerPhase/workerFinish), so
+// it shows exactly what every busy worker is doing right now: operation
+// (clone/fetch), current git phase, percent, and how long it's been running.
+// A wedge is now visible at a glance — workers sit frozen on a phase while
+// their elapsed clock climbs.
+private struct LiveActivityPanel: View {
+    @EnvironmentObject private var state: AppState
+    // Ticks once a second purely to refresh the elapsed-time column.
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    // Flatten activeWorkers into a sorted list, longest-running first (the
+    // most likely culprit if something is stuck).
+    private var workers: [LiveWorker] {
+        state.activeWorkers.flatMap { platform, repos in
+            repos.map { LiveWorker(platform: platform, rel: $0.key, w: $0.value) }
+        }
+        .sorted { $0.w.startedAt < $1.w.startedAt }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Active workers")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(workers.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
+            if workers.isEmpty {
+                Text("No workers running right now (discovering / warming / scanning).")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(workers) { item in
+                            WorkerRow(item: item, now: now)
+                        }
+                    }
+                    .padding(6)
+                }
+                .frame(maxHeight: 180)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .onReceive(tick) { now = $0 }
+    }
+}
+
+// One in-flight worker, identified by (platform, rel) so the same rel under
+// two platforms (e.g. a mirrored repo) doesn't collide as a SwiftUI id.
+private struct LiveWorker: Identifiable {
+    let platform: String
+    let rel: String
+    let w: WorkerView
+    var id: String { platform + "\u{1F}" + rel }
+}
+
+private struct WorkerRow: View {
+    let item: LiveWorker
+    let now: Date
+
+    private var elapsed: String {
+        let s = max(0, Int(now.timeIntervalSince(item.w.startedAt)))
+        return s >= 60 ? String(format: "%d:%02d", s / 60, s % 60) : "\(s)s"
+    }
+    // Anything sitting in one phase for a long time is the likely wedge.
+    private var isStalled: Bool { now.timeIntervalSince(item.w.startedAt) > 60 }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: item.w.op == "clone" ? "arrow.down.circle" : "arrow.triangle.2.circlepath")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            Text(item.rel)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1).truncationMode(.head)
+            Spacer(minLength: 8)
+            Text(item.w.phase + (item.w.pct.map { " \($0)%" } ?? ""))
+                .font(.caption).foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(elapsed)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(isStalled ? .orange : .secondary)
+                .frame(minWidth: 38, alignment: .trailing)
         }
     }
 }

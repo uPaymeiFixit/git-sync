@@ -12,4 +12,9 @@ enum SyncEvent: Equatable, Sendable {
     case workerFinish(platform: String, rel: String)
     case outcome(platform: String, outcome: Outcome)
     case remoteProject(platform: String, rel: String, sshURL: String, defaultBranch: String)
+    // A coarse "what is the run doing right now" label for the live UI:
+    // "Discovering GitLab…", "Warming SSH connections…", "Syncing 2084 repos…".
+    // Coalesced in EventBuffer (only the latest matters). Emitted by the
+    // native engine only; the Python path never produces it.
+    case phase(label: String)
 }

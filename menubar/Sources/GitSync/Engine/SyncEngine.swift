@@ -227,6 +227,7 @@ actor SyncEngine {
         var perPlatformComplete: [Platform: Bool] = [:]
         for platform in platforms {
             if aborted { break }
+            await sink.emit(.phase(label: "Discovering \(platform.titleName)…"))
             let client = makeClient(platform)
             let result = client.discoverAll(skip: skip)
             perPlatformComplete[platform] = (result.fatalError == nil)
@@ -255,6 +256,9 @@ actor SyncEngine {
 
         // Prewarm SSH masters before fan-out (the 20x speedup).
         let hosts = SSHMultiplexer.uniqueHosts(jobs.filter { !$0.skipped }.map { $0.repo.sshURL })
+        if !hosts.isEmpty {
+            await sink.emit(.phase(label: "Warming \(hosts.count) SSH connection\(hosts.count == 1 ? "" : "s")…"))
+        }
         let warmed = mux.prewarm(hosts: hosts)
         defer { mux.cleanup(pairs: warmed) }
 
@@ -267,7 +271,9 @@ actor SyncEngine {
         }
 
         // Fan out across all repos with a bounded concurrency cap.
+        await sink.emit(.phase(label: "Syncing \(toSync.count) repo\(toSync.count == 1 ? "" : "s")…"))
         await fanOut(toSync, mux: mux)
+        await sink.emit(.phase(label: "Scanning for stale local checkouts…"))
 
         // Stale-on-disk / non-git-dir scan per platform, only when that
         // platform's discovery was complete (mirrors finish_run gating).

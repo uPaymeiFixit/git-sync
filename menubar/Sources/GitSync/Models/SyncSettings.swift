@@ -73,4 +73,15 @@ enum Platform: String, CaseIterable, Sendable {
     }
 
     var displayName: String { rawValue }
+
+    // Human-facing, capitalized form for UI labels (e.g. "GitLab"). Kept
+    // separate from displayName so nothing that keys off the lowercase
+    // rawValue breaks.
+    var titleName: String {
+        switch self {
+        case .gitlab:    return "GitLab"
+        case .bitbucket: return "Bitbucket"
+        case .github:    return "GitHub"
+        }
+    }
 }

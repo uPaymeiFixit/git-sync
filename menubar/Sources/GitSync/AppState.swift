@@ -225,14 +225,14 @@ final class AppState: ObservableObject {
                 activeWorkers[snap.platform, default: [:]][snap.rel] = w
             }
         }
-        // Captured stderr lines, prefixed by platform.
-        if !batch.logs.isEmpty, currentRun != nil {
-            // Mutate via a working copy to limit @Published republishes to
-            // one per drain instead of N per drain.
+        // Captured stderr lines + the coarse run-phase label. Folded into one
+        // working-copy mutation so @Published republishes once per drain.
+        if currentRun != nil, !batch.logs.isEmpty || batch.runPhase != nil {
             var run = currentRun!
             for entry in batch.logs {
                 run.logLines.append("[\(entry.platform)] \(entry.line)")
             }
+            if let label = batch.runPhase { run.phaseLabel = label }
             currentRun = run
         }
         // Per-platform terminations + activeWorkers cleanup (full-run lane).
@@ -292,6 +292,10 @@ final class AppState: ObservableObject {
         case .remoteProject(let platform, let rel, let sshURL, let defaultBranch):
             inventory.apply(remoteProject: platform, rel: rel,
                             sshURL: sshURL, defaultBranch: defaultBranch)
+        case .phase(let label):
+            // Normally coalesced into batch.runPhase; handled here too for
+            // exhaustiveness (and so a stray un-coalesced .phase still lands).
+            currentRun?.phaseLabel = label
         }
     }
 }

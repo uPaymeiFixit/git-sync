@@ -38,6 +38,10 @@ actor EventBuffer {
     // "the whole run is done" and tears down the others.
     private var individualFinishes: [(id: RepoID, exitCode: Int32)] = []
 
+    // Latest coarse run-phase label ("Discovering GitLab…", etc.). Coalesced:
+    // only the most recent matters. nil until the first .phase event.
+    private var latestRunPhase: String?
+
     struct WorkerPhaseSnapshot: Sendable {
         let platform: String
         let rel: String
@@ -52,10 +56,12 @@ actor EventBuffer {
         let finishes: [(platform: String, exitCode: Int32)]
         let allFinished: Bool
         let individualFinishes: [(id: RepoID, exitCode: Int32)]
+        let runPhase: String?
 
         var isEmpty: Bool {
             events.isEmpty && latestPhases.isEmpty && logs.isEmpty
                 && finishes.isEmpty && !allFinished && individualFinishes.isEmpty
+                && runPhase == nil
         }
     }
 
@@ -67,6 +73,9 @@ actor EventBuffer {
             let key = platform + "\u{1F}" + rel
             latestPhase[key] = WorkerPhaseSnapshot(
                 platform: platform, rel: rel, phase: phase, pct: pct)
+        case .phase(let label):
+            // Coalesce: only the most recent run-phase label survives a drain.
+            latestRunPhase = label
         case .workerStart, .workerFinish, .outcome, .sessionStart, .sessionEnd,
              .remoteProject:
             events.append(event)
@@ -96,7 +105,8 @@ actor EventBuffer {
             logs: logLines,
             finishes: platformFinishes,
             allFinished: allFinished,
-            individualFinishes: individualFinishes
+            individualFinishes: individualFinishes,
+            runPhase: latestRunPhase
         )
         events.removeAll(keepingCapacity: true)
         latestPhase.removeAll(keepingCapacity: true)
@@ -104,6 +114,7 @@ actor EventBuffer {
         platformFinishes.removeAll(keepingCapacity: true)
         allFinished = false
         individualFinishes.removeAll(keepingCapacity: true)
+        latestRunPhase = nil
         return snapshot
     }
 }
