@@ -244,8 +244,26 @@ enum RepoSyncer {
         return r.code == 0 && r.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private static func isDirty(_ path: String, _ ctx: GitContext) -> Bool {
-        let r = GitRunner.git(path, "status", "--porcelain", env: ctx.makeEnv())
-        return r.code == 0 && !r.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let env = ctx.makeEnv()
+        let r = GitRunner.git(path, "status", "--porcelain", env: env)
+        guard r.code == 0 else { return false }
+        if r.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
+
+        // Non-empty status. Before trusting it, rule out a "racy index" false
+        // positive: when a tracked file's mtime can't disambiguate it from the
+        // index (e.g. just-written by the fetch/checkout we ran moments ago),
+        // git's stat-only check reports it as possibly-modified. The canonical
+        // resolution is to refresh the stat cache (which compares CONTENT for
+        // the ambiguous entries) and re-check. This is what a second `git
+        // status` would do on its own. Observed in production: 14 GitHub repos
+        // flagged dirty/updated-dirty mid-sync that were provably clean on disk
+        // immediately after (git status --porcelain empty). `update-index
+        // --refresh` exits non-zero when it finds real modifications, so we
+        // can't gate on its exit code — re-run porcelain as the authority.
+        _ = GitRunner.git(path, "update-index", "-q", "--refresh", env: env)
+        let r2 = GitRunner.git(path, "status", "--porcelain", env: env)
+        guard r2.code == 0 else { return false }
+        return !r2.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private static func currentBranch(_ path: String, _ ctx: GitContext) -> String {
         let r = GitRunner.git(path, "symbolic-ref", "--quiet", "--short", "HEAD", env: ctx.makeEnv())
