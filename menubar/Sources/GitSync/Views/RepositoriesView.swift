@@ -11,6 +11,7 @@ struct RepositoriesView: View {
     @EnvironmentObject private var inventory: InventoryStore
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var settings: SettingsStore
+    @Environment(\.openWindow) private var openWindow
 
     @State private var searchText: String = ""
     @State private var enabledStatuses: Set<SyncStatus> = Set(SyncStatus.allCases)
@@ -36,15 +37,31 @@ struct RepositoriesView: View {
             toolbar(visibleCount: visibleCount, chipCounts: chipCounts)
             Divider()
             if visibleCount == 0 {
-                ContentUnavailableView(
-                    inventory.repos.isEmpty ? "No repositories yet" : "Nothing matches",
-                    systemImage: inventory.repos.isEmpty
-                        ? "tray" : "magnifyingglass",
-                    description: Text(inventory.repos.isEmpty
-                        ? "Run a sync to populate the inventory. The repos you have access to will appear here."
-                        : "Adjust the search or filter chips above.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if inventory.repos.isEmpty && !settings.isConfigured {
+                    // Fresh, unconfigured install: point at setup, not "run a
+                    // sync" (which would do nothing with no platform configured).
+                    ContentUnavailableView {
+                        Label("Not set up yet", systemImage: "gearshape")
+                    } description: {
+                        Text("Configure at least one platform so GitSync knows what to sync.")
+                    } actions: {
+                        Button("Set Up GitSync…") {
+                            openWindow(id: "onboarding")
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ContentUnavailableView(
+                        inventory.repos.isEmpty ? "No repositories yet" : "Nothing matches",
+                        systemImage: inventory.repos.isEmpty
+                            ? "tray" : "magnifyingglass",
+                        description: Text(inventory.repos.isEmpty
+                            ? "Run a sync to populate the inventory. The repos you have access to will appear here."
+                            : "Adjust the search or filter chips above.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
                 repoList(groups: groups)
             }
