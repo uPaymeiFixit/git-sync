@@ -52,13 +52,33 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources/bin"
 cp Vendor/glab "${APP_BUNDLE}/Contents/Resources/bin/glab"
 chmod +x "${APP_BUNDLE}/Contents/Resources/bin/glab"
 
-# Codesign with an ad-hoc signature so macOS will load the bundle. Without
-# this, Gatekeeper still allows launch (the user gets the "developer cannot
-# be verified" dialog) but spawning the app loses Keychain access on macOS
-# 15+. Ad-hoc sig is enough for personal builds; replace with a Developer
-# ID Application identity for sharing.
-echo "» codesign --sign -"
-codesign --sign - --force --timestamp=none --options=runtime "${APP_BUNDLE}"
+# Codesign with a STABLE identity. macOS keychain items remember which signing
+# identity may read them; an ad-hoc signature (codesign --sign -) has no stable
+# identity — its code hash changes every build — so the keychain ACL never
+# matches twice and you're re-prompted for your password for every stored
+# secret on every relaunch. Signing with a persistent self-signed identity
+# means you grant "Always Allow" once.
+#
+# Identity resolution:
+#   - SIGN_IDENTITY env var wins (set it to a "Developer ID Application: …"
+#     identity when you're ready to distribute + notarize for other Macs).
+#   - else the local self-signed "GitSync Self-Signed" (run
+#     Tools/make-signing-cert.sh once to create it).
+#   - else fall back to ad-hoc with a warning (builds still run locally, but
+#     the password prompts come back).
+SELF_SIGNED_CN="GitSync Self-Signed"
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+    IDENTITY="${SIGN_IDENTITY}"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "${SELF_SIGNED_CN}"; then
+    IDENTITY="${SELF_SIGNED_CN}"
+else
+    IDENTITY="-"
+    echo "⚠️  No stable signing identity found — falling back to ad-hoc."
+    echo "    Run ./Tools/make-signing-cert.sh once to stop the repeated keychain"
+    echo "    password prompts on relaunch."
+fi
+echo "» codesign --sign \"${IDENTITY}\""
+codesign --sign "${IDENTITY}" --force --timestamp=none --options=runtime "${APP_BUNDLE}"
 
 echo
 echo "✓ Built ${APP_BUNDLE}"
