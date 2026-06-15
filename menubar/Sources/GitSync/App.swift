@@ -121,7 +121,7 @@ struct GitSyncApp: App {
                     installTerminationGuard()
                 }
         } label: {
-            MenuBarIcon(state: state)
+            MenuBarIcon(state: state, settings: settings)
         }
         .menuBarExtraStyle(.menu)
 
@@ -135,6 +135,13 @@ struct GitSyncApp: App {
                 .onChange(of: settings.scheduleDailyHour) { _, _ in state.rescheduleIfNeeded() }
                 .onChange(of: settings.scheduleDailyMinute) { _, _ in state.rescheduleIfNeeded() }
         }
+
+        Window("Set Up GitSync", id: "onboarding") {
+            OnboardingView()
+                .environmentObject(settings)
+                .environmentObject(state)
+        }
+        .windowResizability(.contentSize)
 
         Window("Repositories", id: "repositories") {
             RepositoriesView()
@@ -168,6 +175,9 @@ struct GitSyncApp: App {
     // syncs — so no extra wiring per source.
     private struct MenuBarIcon: View {
         @ObservedObject var state: AppState
+        @ObservedObject var settings: SettingsStore
+        @Environment(\.openWindow) private var openWindow
+
         @StateObject private var spin = SpinDriver()
 
         var body: some View {
@@ -177,7 +187,19 @@ struct GitSyncApp: App {
                   ? SpinDriver.frames[spin.frame]
                   : state.menuBarIconName)
                 .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
-                .onAppear { spin.setRunning(state.anyActivity) }
+                .onAppear {
+                    spin.setRunning(state.anyActivity)
+                    // First-launch onboarding. The menu-bar label renders at
+                    // launch (the MENU content's .onAppear only fires when the
+                    // menu is opened), so this is where we catch a fresh,
+                    // unconfigured install and pop the setup window once.
+                    if settings.shouldShowOnboarding {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            openWindow(id: "onboarding")
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
+                    }
+                }
                 .onChange(of: state.anyActivity) { _, running in
                     spin.setRunning(running)
                 }

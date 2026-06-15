@@ -37,60 +37,70 @@ private struct PathsTab: View {
 }
 
 private struct PlatformsTab: View {
-    @EnvironmentObject private var settings: SettingsStore
-    @EnvironmentObject private var state: AppState
-
     var body: some View {
         Form {
-            Section("GitLab") {
-                EnabledCheckbox(skipBinding: $settings.skipGitlab,
-                                label: "Enable GitLab sync")
-                LabeledField(label: "Host",
-                             value: $settings.gitlabHost,
-                             prompt: "gitlab.example.com")
-                LabeledSecureField(label: "Personal access token",
-                                   value: $settings.gitlabToken,
-                                   prompt: "glpat-…",
-                                   generateURL: gitlabTokenURL())
-                FilterModeRow(platform: "gitlab")
-                Text("Token stored in Keychain. Needs `read_api` and `read_repository` scopes. Required — GitLab discovery uses the API directly.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("GitHub") {
-                EnabledCheckbox(skipBinding: $settings.skipGithub,
-                                label: "Enable GitHub sync")
-                LabeledField(label: "Organization",
-                             value: $settings.githubOrg,
-                             prompt: "your-github-org")
-                LabeledSecureField(label: "Personal access token",
-                                   value: $settings.githubToken,
-                                   prompt: "ghp_…",
-                                   generateURL: URL(string: "https://github.com/settings/tokens/new?scopes=repo&description=GitSync"))
-                FilterModeRow(platform: "github")
-                Text("Token stored in Keychain. Classic PAT needs `repo` scope; fine-grained needs Contents+Metadata read on the org.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("Bitbucket") {
-                EnabledCheckbox(skipBinding: $settings.skipBitbucket,
-                                label: "Enable Bitbucket sync")
-                LabeledField(label: "Workspace",
-                             value: $settings.bitbucketWorkspace,
-                             prompt: "your-workspace-slug")
-                LabeledField(label: "Username",
-                             value: $settings.bitbucketUser,
-                             prompt: "your-bitbucket-username")
-                LabeledSecureField(label: "App password",
-                                   value: $settings.bitbucketAppPassword,
-                                   prompt: "",
-                                   generateURL: URL(string: "https://bitbucket.org/account/settings/app-passwords/new"))
-                FilterModeRow(platform: "bitbucket")
-                Text("App password stored in Keychain. Needs read:repository:bitbucket scope.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            PlatformConfigSections(showFilterMode: true)
         }
         .formStyle(.grouped)
+    }
+}
+
+// The GitLab / GitHub / Bitbucket credential sections, shared by Settings →
+// Platforms and the first-launch onboarding window so the two never drift.
+// `showFilterMode` hides the advanced whitelist toggle during onboarding to
+// keep first-launch simple.
+struct PlatformConfigSections: View {
+    @EnvironmentObject private var settings: SettingsStore
+    var showFilterMode: Bool = true
+
+    var body: some View {
+        Section("GitLab") {
+            EnabledCheckbox(skipBinding: $settings.skipGitlab,
+                            label: "Enable GitLab sync")
+            LabeledField(label: "Host",
+                         value: $settings.gitlabHost,
+                         prompt: "gitlab.example.com")
+            LabeledSecureField(label: "Personal access token",
+                               value: $settings.gitlabToken,
+                               prompt: "glpat-…",
+                               generateURL: gitlabTokenURL())
+            if showFilterMode { FilterModeRow(platform: "gitlab") }
+            Text("Token stored in Keychain. Needs `read_api` and `read_repository` scopes. Required — GitLab discovery uses the API directly.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        Section("GitHub") {
+            EnabledCheckbox(skipBinding: $settings.skipGithub,
+                            label: "Enable GitHub sync")
+            LabeledField(label: "Organization",
+                         value: $settings.githubOrg,
+                         prompt: "your-github-org")
+            LabeledSecureField(label: "Personal access token",
+                               value: $settings.githubToken,
+                               prompt: "ghp_…",
+                               generateURL: URL(string: "https://github.com/settings/tokens/new?scopes=repo&description=GitSync"))
+            if showFilterMode { FilterModeRow(platform: "github") }
+            Text("Token stored in Keychain. Classic PAT needs `repo` scope; fine-grained needs Contents+Metadata read on the org.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        Section("Bitbucket") {
+            EnabledCheckbox(skipBinding: $settings.skipBitbucket,
+                            label: "Enable Bitbucket sync")
+            LabeledField(label: "Workspace",
+                         value: $settings.bitbucketWorkspace,
+                         prompt: "your-workspace-slug")
+            LabeledField(label: "Username",
+                         value: $settings.bitbucketUser,
+                         prompt: "your-bitbucket-username")
+            LabeledSecureField(label: "App password",
+                               value: $settings.bitbucketAppPassword,
+                               prompt: "",
+                               generateURL: URL(string: "https://bitbucket.org/account/settings/app-passwords/new"))
+            if showFilterMode { FilterModeRow(platform: "bitbucket") }
+            Text("App password stored in Keychain. Needs read:repository:bitbucket scope.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     private func gitlabTokenURL() -> URL? {
@@ -209,7 +219,7 @@ private struct ScheduleTab: View {
 // Wraps an inverted Skip* toggle into an "Enabled" checkbox. The wire
 // format (env var) stays as GIT_SYNC_SKIP_X=1 so the Python scripts
 // don't have to change; the UI just shows the user the opposite.
-private struct EnabledCheckbox: View {
+struct EnabledCheckbox: View {
     @Binding var skipBinding: Bool
     let label: String
 
@@ -225,7 +235,7 @@ private struct EnabledCheckbox: View {
 // Per-platform sync scope: sync everything (default) vs. only repos the user
 // has tracked (whitelist). Routed through AppState.setFilterMode so flipping
 // to whitelist auto-tracks what's already on disk.
-private struct FilterModeRow: View {
+struct FilterModeRow: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var settings: SettingsStore
     let platform: String
@@ -250,7 +260,7 @@ private struct FilterModeRow: View {
 // shows INSIDE the box. Empty values show the prompt as placeholder text.
 // roundedBorder gives a visible outline so the field doesn't disappear
 // into the form background.
-private struct LabeledField: View {
+struct LabeledField: View {
     let label: String
     @Binding var value: String
     let prompt: String
@@ -264,7 +274,7 @@ private struct LabeledField: View {
     }
 }
 
-private struct LabeledSecureField: View {
+struct LabeledSecureField: View {
     let label: String
     @Binding var value: String
     let prompt: String
@@ -292,7 +302,7 @@ private struct LabeledSecureField: View {
 
 // Folder picker: a text field showing the current path with a "Choose…"
 // button that opens NSOpenPanel.
-private struct FolderField: View {
+struct FolderField: View {
     @Binding var value: String
     let prompt: String
 

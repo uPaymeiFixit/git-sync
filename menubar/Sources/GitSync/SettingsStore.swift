@@ -38,6 +38,7 @@ final class SettingsStore: ObservableObject {
         static let lastSuccessfulRun      = "lastSuccessfulRun"       // legacy global (migrated)
         static let lastSuccessByPlatform  = "lastSuccessByPlatform"  // [platform rawValue: Date]
         static let filterModeByPlatform   = "filterModeByPlatform"   // [platform rawValue: FilterMode raw]
+        static let hasCompletedSetup      = "hasCompletedSetup"      // first-launch onboarding done
     }
     private enum KKey {
         static let githubToken         = "github_token"
@@ -137,6 +138,26 @@ final class SettingsStore: ObservableObject {
         return out
     }
 
+    // ---- First-launch onboarding -------------------------------------
+
+    // True once at least one platform has its required identity field set —
+    // i.e. the app can actually do something. Used to decide whether to show
+    // onboarding and as the menu/inventory empty-state trigger.
+    var isConfigured: Bool {
+        !gitlabHost.isEmpty || !githubOrg.isEmpty || !bitbucketWorkspace.isEmpty
+    }
+
+    // Persisted: the user has been through (or dismissed) first-launch setup.
+    // Distinct from isConfigured so we don't re-pop onboarding for someone who
+    // intentionally left everything blank.
+    @Published var hasCompletedSetup: Bool {
+        didSet { UserDefaults.standard.set(hasCompletedSetup, forKey: DKey.hasCompletedSetup) }
+    }
+
+    // Show the first-launch onboarding window? Only when nothing is configured
+    // AND the user hasn't already completed/dismissed setup.
+    var shouldShowOnboarding: Bool { !hasCompletedSetup && !isConfigured }
+
     // ---- Keychain-backed secrets --------------------------------------
     @Published var githubToken: String {
         didSet { Keychain.set(githubToken, for: KKey.githubToken) }
@@ -195,6 +216,7 @@ final class SettingsStore: ObservableObject {
             self.lastSuccessByPlatform = [:]
         }
         self.filterModeByPlatform = (d.dictionary(forKey: DKey.filterModeByPlatform) as? [String: String]) ?? [:]
+        self.hasCompletedSetup  = d.bool(forKey: DKey.hasCompletedSetup)
         self.githubToken        = Keychain.get(KKey.githubToken) ?? ""
         self.gitlabToken        = Keychain.get(KKey.gitlabToken) ?? ""
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""
