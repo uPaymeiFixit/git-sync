@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 // Runs `git` subprocesses for the native sync engine. This is the Swift
 // port of scripts/_sync.py's _git / _run_streaming / run_with_retry, kept
@@ -147,21 +148,39 @@ enum GitRunner {
     // One streaming attempt. Enforces `timeout` manually (Process has no
     // built-in deadline), splits output on '\n'/'\r' for progress, and kills
     // the child on timeout or abort. Port of _run_streaming.
-    private static func runStreamingOnce(
+    // `exe` defaults to git; tests inject a different program (e.g. /bin/sh)
+    // to exercise the streaming loop's exit/EOF handling directly.
+    static func runStreamingOnce(
         _ args: [String],
         env: [String: String],
         timeout: TimeInterval,
         isAborted: @escaping @Sendable () -> Bool,
-        onProgress: ProgressHandler?
+        onProgress: ProgressHandler?,
+        exe: String = gitPath
     ) -> GitResult {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: gitPath)
+        p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
+
+        // Did the GIT child itself exit? This is the loop's real "done"
+        // signal — NOT pipe EOF. With SSH ControlMaster (ControlPersist=120s)
+        // the persistent master process inherits this pipe's write-end, so it
+        // stays open after git exits and EOF NEVER arrives. Relying on EOF
+        // alone parked every worker in select() until the 1800s timeout — the
+        // "stuck at 'starting', 296 [timed out after 1800s]" wedge. Python's
+        // _run_streaming avoids this by checking proc.poll() on every select
+        // timeout slice; this flag is the faithful equivalent. terminationHandler
+        // fires from Foundation's own child-monitoring queue (not the caller's
+        // runloop), so it's reliable on these runloop-less pool threads where
+        // p.isRunning is not.
+        let exited = Atomic<Bool>(false)
+        p.terminationHandler = { _ in exited.store(true, ordering: .releasing) }
+
         do { try p.run() } catch {
             return GitResult(ok: false, output: "command not found: \(error.localizedDescription)",
                              timedOut: false, aborted: false)
@@ -175,13 +194,11 @@ enum GitRunner {
         var aborted = false
 
         // Mirror Python's _run_streaming: non-blocking fd + select() with a
-        // bounded slice. The AUTHORITATIVE end-of-stream signal is read()
-        // returning 0 (EOF) — i.e. git AND every helper child that inherited
-        // the pipe write-end have closed it. We do NOT rely on p.isRunning to
-        // end the loop: on a thread with no run loop, Foundation may not reap
-        // the child promptly, so isRunning can stay true long after exit (the
-        // bug that made this look like a hang). EOF is reliable; isRunning is
-        // not.
+        // bounded slice. We end on EITHER pipe EOF (read==0) OR the git child
+        // exiting (`exited` flag). EOF alone is NOT sufficient: a persistent
+        // SSH ControlMaster keeps the pipe write-end open long after git is
+        // gone, so we'd block forever. Process exit is the authoritative
+        // signal, matching Python's proc.poll() check.
         let flags = fcntl(readFD, F_GETFL, 0)
         _ = fcntl(readFD, F_SETFL, flags | O_NONBLOCK)
 
@@ -224,11 +241,35 @@ enum GitRunner {
             let sel = select(readFD + 1, &readSet, nil, nil, &tv)
             if sel > 0 {
                 if readAvailable() { break readLoop }   // EOF → done
+            } else if exited.load(ordering: .acquiring) {
+                // sel == 0 (no data this slice) AND git has exited. Mirrors
+                // Python's `if not rlist: if proc.poll() is not None: break`.
+                // Drain whatever git flushed just before exiting, then stop —
+                // do NOT wait for pipe EOF (a persistent ssh master may hold
+                // the write-end open indefinitely).
+                _ = readAvailable()
+                break readLoop
             }
-            // sel == 0 (timeout slice) or sel < 0 (EINTR): just loop; the
-            // deadline/abort checks at the top bound the wait.
+            // sel == 0 with git still running, or sel < 0 (EINTR): loop; the
+            // deadline/abort/exit checks bound the wait.
         }
-        p.waitUntilExit()
+        // We left the loop because: git exited (EOF or `exited`), we hit the
+        // deadline, or we were aborted. Reap before reading terminationStatus
+        // — reading it on a live Process traps. We deliberately do NOT call
+        // waitUntilExit() unconditionally: on these runloop-less pool threads
+        // it can block when the pipe write-end is still held by a persistent
+        // ssh master (the very bug we're fixing). Instead spin on the `exited`
+        // flag (set by terminationHandler from Foundation's own dispatch
+        // queue, runloop-independent), with a bounded fallback so a
+        // pathological child can't wedge the worker. The handler fires within
+        // ~1ms of FD close / SIGTERM, so the common EOF case spins once or
+        // twice; the 10s ceiling only matters if the handler never fires, in
+        // which case we degrade to a retryable soft failure below.
+        let reapDeadline = Date().addingTimeInterval(10)
+        while !exited.load(ordering: .acquiring) && Date() < reapDeadline {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        let reaped = exited.load(ordering: .acquiring)
 
         // Flush trailing partial line (no terminator).
         if !buf.isEmpty {
@@ -243,6 +284,13 @@ enum GitRunner {
         }
         if aborted {
             return GitResult(ok: false, output: output + "\n[aborted]", timedOut: false, aborted: true)
+        }
+        // If we somehow couldn't confirm exit within the reap window, don't
+        // touch terminationStatus (it would trap) — treat as a soft failure so
+        // run_with_retry can decide. In practice `reaped` is always true here.
+        guard reaped else {
+            return GitResult(ok: false, output: output + "\n[exit not observed]",
+                             timedOut: false, aborted: false)
         }
         return GitResult(ok: p.terminationStatus == 0, output: output, timedOut: false, aborted: false)
     }

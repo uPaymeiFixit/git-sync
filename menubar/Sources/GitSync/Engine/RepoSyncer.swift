@@ -224,11 +224,18 @@ enum RepoSyncer {
     }
     private static func remoteHasNoRefs(_ path: String, _ ctx: GitContext) -> Bool {
         // ls-remote is the only NETWORK query routed through the non-streaming
-        // runner (which reads to EOF). Force ControlMaster=no so it can't spawn
-        // or attach a persistent ssh master that would hold the pipe write-end
-        // open for ControlPersist seconds after ls-remote itself exits — that
-        // would block the EOF read. (The streaming clone/fetch path tolerates
-        // the master fine; this one-shot does not.)
+        // runner (GitRunner.git, which reads to EOF). Force ControlMaster=no so
+        // it can't spawn or attach a persistent ssh master that would hold the
+        // pipe write-end open for ControlPersist seconds after ls-remote itself
+        // exits — that would block the read-to-EOF forever.
+        //
+        // The streaming clone/fetch path (GitRunner.runStreamingOnce) does NOT
+        // need this and MUST keep the master alive (it's the 40min→2min win):
+        // it tolerates the leaked write-end because it ends its read loop on
+        // the git child's exit (the `exited` flag), not on pipe EOF. If you
+        // ever change that loop back to EOF-only, this one-shot is no longer
+        // the only place that needs ControlMaster=no — the whole engine
+        // regresses. Keep the two coupled.
         var env = ctx.makeEnv()
         if let ssh = env["GIT_SSH_COMMAND"] {
             env["GIT_SSH_COMMAND"] = ssh + " -o ControlMaster=no"
