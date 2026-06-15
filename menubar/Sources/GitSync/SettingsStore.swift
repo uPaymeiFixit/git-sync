@@ -35,6 +35,7 @@ final class SettingsStore: ObservableObject {
         static let scheduleHours          = "scheduleHours"
         static let scheduleDailyHour      = "scheduleDailyHour"
         static let scheduleDailyMinute    = "scheduleDailyMinute"
+        static let lastSuccessfulRun      = "lastSuccessfulRun"
     }
     private enum KKey {
         static let githubToken         = "github_token"
@@ -97,6 +98,14 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(scheduleDailyMinute, forKey: DKey.scheduleDailyMinute) }
     }
 
+    // When the last FULL run completed successfully (all enabled platforms
+    // exit 0). Drives missed-run catch-up: the scheduler compares this against
+    // the schedule's expected previous fire to decide whether a run is overdue
+    // (e.g. the Mac was asleep at midnight). nil = never completed a clean run.
+    @Published var lastSuccessfulRun: Date? {
+        didSet { UserDefaults.standard.set(lastSuccessfulRun, forKey: DKey.lastSuccessfulRun) }
+    }
+
     // ---- Keychain-backed secrets --------------------------------------
     @Published var githubToken: String {
         didSet { Keychain.set(githubToken, for: KKey.githubToken) }
@@ -133,6 +142,7 @@ final class SettingsStore: ObservableObject {
         self.scheduleHours      = d.object(forKey: DKey.scheduleHours) as? Int ?? 4
         self.scheduleDailyHour  = d.object(forKey: DKey.scheduleDailyHour) as? Int ?? 9
         self.scheduleDailyMinute = d.object(forKey: DKey.scheduleDailyMinute) as? Int ?? 0
+        self.lastSuccessfulRun  = d.object(forKey: DKey.lastSuccessfulRun) as? Date
         self.githubToken        = Keychain.get(KKey.githubToken) ?? ""
         self.gitlabToken        = Keychain.get(KKey.gitlabToken) ?? ""
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""

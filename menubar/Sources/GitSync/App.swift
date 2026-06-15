@@ -59,6 +59,9 @@ struct GitSyncApp: App {
         if args.contains("--fd-leak-test") {
             exit(FDLeakTest.run())
         }
+        if args.contains("--scheduler-test") {
+            exit(SchedulerTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the

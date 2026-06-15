@@ -53,7 +53,10 @@ final class AppState: ObservableObject {
     // Called by App.swift whenever a schedule-related setting changes,
     // so the timer reflects the new mode/interval without an app restart.
     func rescheduleIfNeeded() {
-        scheduler.reschedule()
+        // start() reschedules the heartbeat AND re-checks catch-up, so changing
+        // the schedule to a time that's already past today fires promptly
+        // rather than waiting for the next heartbeat.
+        scheduler.start()
     }
 
     // isRunning means specifically "a full run is active" — it drives the
@@ -263,6 +266,16 @@ final class AppState: ObservableObject {
         activeWorkers = [:]
         history.record(run)
         releaseDrainTimer()
+        // Record a successful completion so the scheduler's catch-up knows we
+        // actually synced (and won't fire a redundant makeup run). "Success" =
+        // every platform that ran exited 0. A VPN-down run where GitLab exits 1
+        // does NOT count, so catch-up will keep trying once the VPN is back.
+        let codes = run.exitCodes.values
+        let allOK = !codes.isEmpty && codes.allSatisfy { $0 == 0 }
+        if allOK {
+            settingsStore.lastSuccessfulRun = run.endedAt
+            scheduler.noteSuccessfulRun()
+        }
     }
 
     private func apply(_ event: SyncEvent) {
