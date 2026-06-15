@@ -45,6 +45,12 @@ struct Repo: Codable, Sendable, Identifiable, Hashable {
 
     var isClonedLocally: Bool
 
+    // Whitelist / "Track" mode: when a platform is in trackedOnly filter mode,
+    // ONLY repos with isTracked == true are cloned/synced. Ignored in syncAll
+    // mode (the default). Persisted with the inventory; decodes to false for
+    // older inventory.json that predates this field (see init(from:)).
+    var isTracked: Bool
+
     // Convenience for view layer. When no real outcome has been observed:
     // a repo found on disk is "not synced yet" (we have it, no sync data),
     // a repo only known from the remote listing is "not cloned yet".
@@ -68,7 +74,8 @@ struct Repo: Codable, Sendable, Identifiable, Hashable {
             lastUpdatedAt: lastUpdatedAt,
             lastSeenRemoteAt: lastSeenRemoteAt,
             lastClonedCheckedAt: lastClonedCheckedAt,
-            isClonedLocally: isClonedLocally
+            isClonedLocally: isClonedLocally,
+            isTracked: isTracked
         )
     }
 
@@ -84,7 +91,8 @@ struct Repo: Codable, Sendable, Identifiable, Hashable {
         lastUpdatedAt: Date? = nil,
         lastSeenRemoteAt: Date? = nil,
         lastClonedCheckedAt: Date? = nil,
-        isClonedLocally: Bool = false
+        isClonedLocally: Bool = false,
+        isTracked: Bool = false
     ) {
         self.id = id
         self.sshURL = sshURL
@@ -98,5 +106,26 @@ struct Repo: Codable, Sendable, Identifiable, Hashable {
         self.lastSeenRemoteAt = lastSeenRemoteAt
         self.lastClonedCheckedAt = lastClonedCheckedAt
         self.isClonedLocally = isClonedLocally
+        self.isTracked = isTracked
+    }
+
+    // Custom decoder so inventory.json written before isTracked existed still
+    // loads (the key is simply absent → false). All other keys decode as
+    // synthesized.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(RepoID.self, forKey: .id)
+        sshURL = try c.decodeIfPresent(String.self, forKey: .sshURL) ?? ""
+        defaultBranch = try c.decodeIfPresent(String.self, forKey: .defaultBranch) ?? ""
+        lastStatus = try c.decodeIfPresent(SyncStatus.self, forKey: .lastStatus)
+        lastDetail = try c.decodeIfPresent(String.self, forKey: .lastDetail) ?? ""
+        lastOldSha = try c.decodeIfPresent(String.self, forKey: .lastOldSha) ?? ""
+        lastNewSha = try c.decodeIfPresent(String.self, forKey: .lastNewSha) ?? ""
+        lastCommitsAhead = try c.decodeIfPresent(Int.self, forKey: .lastCommitsAhead) ?? 0
+        lastUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .lastUpdatedAt)
+        lastSeenRemoteAt = try c.decodeIfPresent(Date.self, forKey: .lastSeenRemoteAt)
+        lastClonedCheckedAt = try c.decodeIfPresent(Date.self, forKey: .lastClonedCheckedAt)
+        isClonedLocally = try c.decodeIfPresent(Bool.self, forKey: .isClonedLocally) ?? false
+        isTracked = try c.decodeIfPresent(Bool.self, forKey: .isTracked) ?? false
     }
 }

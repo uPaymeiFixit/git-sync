@@ -68,7 +68,9 @@ final class InventoryStore: ObservableObject {
         // Any non-stale, non-skipped status implies we have it locally.
         switch outcome.status {
         case .cloned, .updated, .updatedDirty, .upToDate, .emptyRemote,
-             .dirty, .diverged, .branchMissing:
+             .dirty, .diverged, .branchMissing, .untracked, .trackedGone:
+            // .untracked / .trackedGone are emitted for on-disk repos in
+            // whitelist mode → they ARE cloned locally.
             repo.isClonedLocally = true
         case .staleOnDisk, .nonGitDir, .skipped, .error, .notClonedYet,
              .notSyncedYet:
@@ -76,6 +78,52 @@ final class InventoryStore: ObservableObject {
         }
         repos[id] = repo
         scheduleSave()
+    }
+
+    // ---- Whitelist / Track mode --------------------------------------
+
+    func setTracked(_ id: RepoID, _ tracked: Bool) {
+        guard var repo = repos[id] else { return }
+        guard repo.isTracked != tracked else { return }
+        repo.isTracked = tracked
+        repos[id] = repo
+        scheduleSave()
+    }
+
+    func setTracked(_ ids: any Sequence<RepoID>, _ tracked: Bool) {
+        var changed = false
+        for id in ids {
+            guard var repo = repos[id], repo.isTracked != tracked else { continue }
+            repo.isTracked = tracked
+            repos[id] = repo
+            changed = true
+        }
+        if changed { scheduleSave() }
+    }
+
+    // When a platform flips into trackedOnly mode, mark everything currently
+    // cloned on disk for that platform as tracked — so nothing the user already
+    // has stops updating. New (not-yet-cloned) repos stay untracked.
+    func autoTrackClonedRepos(platform: String) {
+        var changed = false
+        for (id, repo) in repos where id.platform == platform {
+            if repo.isClonedLocally && !repo.isTracked {
+                var r = repo
+                r.isTracked = true
+                repos[id] = r
+                changed = true
+            }
+        }
+        if changed { scheduleSave() }
+    }
+
+    // The tracked repos for a platform, as canonical rels — handed to the
+    // engine (via the run env) so it knows which repos to sync in trackedOnly
+    // mode. Empty set = nothing tracked yet.
+    func trackedRels(platform: String) -> [String] {
+        repos.values
+            .filter { $0.id.platform == platform && $0.isTracked }
+            .map { $0.id.rel }
     }
 
     // ---- Local-delete bookkeeping -------------------------------------
@@ -194,6 +242,7 @@ final class InventoryStore: ObservableObject {
         let (primary, secondary) = (a.lastStatus == nil && b.lastStatus != nil) ? (b, a) : (a, b)
         var base = primary
         base.isClonedLocally = a.isClonedLocally || b.isClonedLocally
+        base.isTracked = a.isTracked || b.isTracked
         if base.sshURL.isEmpty { base.sshURL = secondary.sshURL }
         if base.defaultBranch.isEmpty { base.defaultBranch = secondary.defaultBranch }
         base.lastSeenRemoteAt = maxDate(a.lastSeenRemoteAt, b.lastSeenRemoteAt)

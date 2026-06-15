@@ -61,6 +61,24 @@ struct SyncSettings: Sendable {
     }()
 }
 
+// How a platform decides which discovered repos to actually clone/sync.
+//   .syncAll      — sync everything except GIT_SYNC_SKIP matches (the default;
+//                   the original behavior).
+//   .trackedOnly  — whitelist: sync ONLY repos the user has explicitly tracked
+//                   (Repo.isTracked). Discovery still lists everything so the
+//                   inventory stays browseable, but only tracked repos clone.
+enum FilterMode: String, CaseIterable, Sendable, Codable {
+    case syncAll
+    case trackedOnly
+
+    var displayName: String {
+        switch self {
+        case .syncAll:     return "Sync all repositories"
+        case .trackedOnly: return "Only tracked repositories"
+        }
+    }
+}
+
 enum Platform: String, CaseIterable, Sendable {
     case gitlab, bitbucket, github
 

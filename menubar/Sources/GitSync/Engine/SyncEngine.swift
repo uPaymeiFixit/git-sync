@@ -60,6 +60,16 @@ actor SyncEngine {
     private var parallel: Int { Int(env["GIT_SYNC_PARALLEL"] ?? "128") ?? 128 }
     private var skip: SkipMatcher { SkipMatcher(env["GIT_SYNC_SKIP"] ?? "") }
 
+    // Per-platform whitelist config (set by AppState.withTrackingEnv).
+    private func filterMode(_ p: Platform) -> FilterMode {
+        FilterMode(rawValue: env["GIT_SYNC_FILTER_MODE_\(p.rawValue.uppercased())"] ?? "") ?? .syncAll
+    }
+    // The tracked canonical rels for a platform, as a set for O(1) membership.
+    private func trackedSet(_ p: Platform) -> Set<String> {
+        let raw = env["GIT_SYNC_TRACKED_\(p.rawValue.uppercased())"] ?? ""
+        return Set(raw.split(separator: "\n").map(String.init))
+    }
+
     // ---- Full run: enabled platforms, exclusive ----
     // listOnly = discover + emit remote_project events, then stop without
     // cloning/fetching anything (inventory refresh; also the safe way to
@@ -235,7 +245,10 @@ actor SyncEngine {
                                  enabled: env["GIT_SYNC_NO_SSH_MUX"] != "1")
 
         // Discover all platforms, emit remote_project events, collect jobs.
-        var jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool)] = []
+        // `skipped`  = blacklist (GIT_SYNC_SKIP) → emits a .skipped outcome.
+        // `excluded` = whitelist exclusion (trackedOnly mode, repo not tracked)
+        //              → silently omitted, no outcome (keeps its prior status).
+        var jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool, excluded: Bool)] = []
         var perPlatformComplete: [Platform: Bool] = [:]
         for platform in platforms {
             if aborted { break }
@@ -265,10 +278,16 @@ actor SyncEngine {
                 await sink.platformFinished(platform.rawValue, exitCode: 1)
                 continue
             }
+            let mode = filterMode(platform)
+            let tracked = mode == .trackedOnly ? trackedSet(platform) : []
             for repo in result.repos {
                 await sink.emit(.remoteProject(platform: platform.rawValue, rel: repo.rel,
                                                sshURL: repo.sshURL, defaultBranch: repo.defaultBranch))
-                jobs.append((platform, repo, skip.matches(repo.namespacePath)))
+                let isSkipped = skip.matches(repo.namespacePath)
+                // In trackedOnly mode, a repo that isn't blacklisted but also
+                // isn't in the tracked whitelist is EXCLUDED (silently omitted).
+                let isExcluded = mode == .trackedOnly && !isSkipped && !tracked.contains(repo.rel)
+                jobs.append((platform, repo, isSkipped, isExcluded))
             }
         }
 
@@ -283,16 +302,23 @@ actor SyncEngine {
             return
         }
 
-        // Prewarm SSH masters before fan-out (the 20x speedup).
-        let hosts = SSHMultiplexer.uniqueHosts(jobs.filter { !$0.skipped }.map { $0.repo.sshURL })
+        // Repos we'll actually sync: neither blacklist-skipped nor
+        // whitelist-excluded.
+        let toSync = jobs.filter { !$0.skipped && !$0.excluded }
+
+        // Prewarm SSH masters before fan-out (the 20x speedup) — only for the
+        // hosts we'll actually contact.
+        let hosts = SSHMultiplexer.uniqueHosts(toSync.map { $0.repo.sshURL })
         if !hosts.isEmpty {
             await sink.emit(.phase(label: "Warming \(hosts.count) SSH connection\(hosts.count == 1 ? "" : "s")…"))
         }
         let warmed = mux.prewarm(hosts: hosts)
         defer { mux.cleanup(pairs: warmed) }
 
-        // Emit skipped outcomes; collect the jobs to actually sync.
-        let toSync = jobs.filter { !$0.skipped }
+        // Emit .skipped outcomes for blacklist matches only. Whitelist
+        // EXCLUDED repos get no outcome — they keep whatever status they had
+        // (e.g. notClonedYet), so the inventory shows "available but untracked"
+        // rather than a misleading "skipped".
         for job in jobs where job.skipped {
             await sink.emit(.outcome(platform: job.platform.rawValue,
                                      outcome: Outcome(platform: job.platform.rawValue, rel: job.repo.rel,
@@ -304,6 +330,24 @@ actor SyncEngine {
         await fanOut(toSync, mux: mux)
         await sink.emit(.phase(label: "Scanning for stale local checkouts…"))
 
+        // Tracked-but-gone (whitelist mode only): a repo the user tracks that
+        // discovery no longer returned. Emit a distinct advisory and add its
+        // dest to `expected` below so the stale-scan doesn't also flag it as
+        // merely "untracked". Never deleted; the local copy stays put.
+        var trackedGoneDests: [Platform: Set<String>] = [:]
+        for platform in platforms where perPlatformComplete[platform] == true && filterMode(platform) == .trackedOnly {
+            let discovered = Set(jobs.filter { $0.platform == platform }.map { $0.repo.rel })
+            for rel in trackedSet(platform) where !discovered.contains(rel) {
+                let dest = syncRoot.appendingPathComponent(rel)
+                // Only report it if it's actually on disk (a tracked repo never
+                // cloned that's also gone from remote is just noise).
+                guard FileManager.default.fileExists(atPath: dest.appendingPathComponent(".git").path) else { continue }
+                trackedGoneDests[platform, default: []].insert(dest.standardizedFileURL.path)
+                await sink.emit(.outcome(platform: platform.rawValue,
+                    outcome: Outcome(platform: platform.rawValue, rel: rel, status: .trackedGone)))
+            }
+        }
+
         // Stale-on-disk / non-git-dir scan per platform, only when that
         // platform's discovery was complete (mirrors finish_run gating).
         for platform in platforms {
@@ -311,11 +355,16 @@ actor SyncEngine {
             let platformRoot = syncRoot.appendingPathComponent(platformDir(platform))
             var expected = Set(jobs.filter { $0.platform == platform }
                 .map { syncRoot.appendingPathComponent($0.repo.rel).standardizedFileURL.path })
-            // (skipped dests are already in `jobs`, so they're in expected)
-            _ = expected  // (kept explicit for parity with finish_run)
+            // Tracked-but-gone repos were already reported above; keep the
+            // stale-scan from double-reporting them.
+            expected.formUnion(trackedGoneDests[platform] ?? [])
+            // In whitelist mode, an on-disk repo that isn't expected is just
+            // "untracked", not "stale-on-disk" (which implies the remote
+            // dropped it). Label it neutrally so it isn't an anomaly.
+            let staleStatus: SyncStatus = filterMode(platform) == .trackedOnly ? .untracked : .staleOnDisk
             let extras = StaleScan.discoverExtras(
                 platformRoot: platformRoot, platform: platform.rawValue,
-                expected: expected, rel: { self.rel($0) })
+                expected: expected, rel: { self.rel($0) }, staleStatus: staleStatus)
             for o in extras { await sink.emit(.outcome(platform: platform.rawValue, outcome: o)) }
         }
 
@@ -373,7 +422,7 @@ actor SyncEngine {
     // Bounded fan-out: at most `parallel` repos syncing at once, each running
     // OFF the actor via the nonisolated syncOne. The TaskGroup tasks no longer
     // hop back onto the actor for the git work, so they genuinely overlap.
-    private func fanOut(_ jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool)],
+    private func fanOut(_ jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool, excluded: Bool)],
                         mux: SSHMultiplexer) async {
         let cap = max(1, parallel)
         let cfg = workConfig()

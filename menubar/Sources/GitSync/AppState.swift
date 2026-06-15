@@ -102,7 +102,7 @@ final class AppState: ObservableObject {
         dismissedRunID = nil
         activeWorkers = [:]
         retainDrainTimer()
-        let snapshot = settingsStore.currentSyncSettings
+        let snapshot = withTrackingEnv(settingsStore.currentSyncSettings)
         if useNativeEngine {
             Task {
                 await engine.updateSettings(snapshot)
@@ -114,6 +114,25 @@ final class AppState: ObservableObject {
                 await runner.startRun()
             }
         }
+    }
+
+    // Overlay per-platform whitelist config onto a run's env. The filter mode
+    // lives in SettingsStore but the tracked set lives in the inventory, so
+    // AppState (which has both) is the only place that can assemble it. The
+    // engine reads GIT_SYNC_FILTER_MODE_<P> / GIT_SYNC_TRACKED_<P> the same way
+    // it reads GIT_SYNC_SKIP.
+    private func withTrackingEnv(_ settings: SyncSettings) -> SyncSettings {
+        var s = settings
+        for platform in Platform.allCases {
+            let key = platform.rawValue
+            let mode = settingsStore.filterMode(platform: key)
+            s.environment["GIT_SYNC_FILTER_MODE_\(key.uppercased())"] = mode.rawValue
+            if mode == .trackedOnly {
+                let rels = inventory.trackedRels(platform: key)
+                s.environment["GIT_SYNC_TRACKED_\(key.uppercased())"] = rels.joined(separator: "\n")
+            }
+        }
+        return s
     }
 
     func cancelRun() {
@@ -143,6 +162,31 @@ final class AppState: ObservableObject {
             }
         }
         return report
+    }
+
+    // ---- Whitelist / Track mode --------------------------------------
+
+    var trackedOnlyPlatforms: Set<String> {
+        Set(Platform.allCases.map(\.rawValue).filter { settingsStore.filterMode(platform: $0) == .trackedOnly })
+    }
+
+    func isTrackedOnly(platform: String) -> Bool {
+        settingsStore.filterMode(platform: platform) == .trackedOnly
+    }
+
+    func setTracked(_ ids: Set<RepoID>, _ tracked: Bool) {
+        inventory.setTracked(ids, tracked)
+    }
+
+    // Flip a platform's filter mode. When turning ON whitelist mode, auto-track
+    // everything already cloned on disk for that platform so nothing the user
+    // already has silently stops updating.
+    func setFilterMode(_ mode: FilterMode, platform: String) {
+        let was = settingsStore.filterMode(platform: platform)
+        settingsStore.setFilterMode(mode, platform: platform)
+        if mode == .trackedOnly && was != .trackedOnly {
+            inventory.autoTrackClonedRepos(platform: platform)
+        }
     }
 
     // Per-repo sync triggered from the Repositories view's "Sync this repo"

@@ -191,6 +191,13 @@ struct RepositoriesView: View {
         if ids.count == 1, let id = ids.first, let repo = inventory.repos[id] {
             Button("Sync this repo") { state.syncRepo(id) }
                 .disabled(state.isRunning || state.isSyncing(id))
+            if state.isTrackedOnly(platform: id.platform) {
+                if repo.isTracked {
+                    Button("Untrack this repo") { state.setTracked([id], false) }
+                } else {
+                    Button("Track this repo") { state.setTracked([id], true) }
+                }
+            }
             Button("Reveal in Finder") { RepoActions.reveal(repo: repo, settings: settings) }
             if !repo.sshURL.isEmpty {
                 Button("Copy SSH URL") {
@@ -211,6 +218,14 @@ struct RepositoriesView: View {
             }
         } else if !ids.isEmpty {
             let onDisk = ids.filter { inventory.repos[$0]?.isClonedLocally == true }
+            // Bulk track/untrack for selections whose platforms are in
+            // whitelist mode (a mixed selection just acts on the eligible ones).
+            let trackable = ids.filter { state.isTrackedOnly(platform: $0.platform) }
+            if !trackable.isEmpty {
+                Button("Track \(trackable.count) repo(s)") { state.setTracked(trackable, true) }
+                Button("Untrack \(trackable.count) repo(s)") { state.setTracked(trackable, false) }
+                Divider()
+            }
             Button("Add \(ids.count) to skip list") {
                 for id in ids {
                     if let repo = inventory.repos[id],
@@ -239,9 +254,9 @@ struct RepositoriesView: View {
     private var statusOrder: [SyncStatus] {
         [
             .error, .dirty, .diverged, .branchMissing, .updatedDirty,
-            .staleOnDisk, .nonGitDir,
+            .staleOnDisk, .nonGitDir, .trackedGone,
             .cloned, .updated, .upToDate,
-            .notSyncedYet, .notClonedYet, .emptyRemote, .skipped,
+            .notSyncedYet, .notClonedYet, .untracked, .emptyRemote, .skipped,
         ]
     }
 
@@ -333,6 +348,18 @@ private struct RepoRow: View {
             // Row actions. Clicking the row itself only selects it; these
             // buttons (and the context menu) are how you act on a repo.
             HStack(spacing: 12) {
+                // Track toggle — only meaningful (and shown) when this repo's
+                // platform is in whitelist mode. Star = tracked.
+                if state.isTrackedOnly(platform: repo.id.platform) {
+                    Button {
+                        state.setTracked([repo.id], !repo.isTracked)
+                    } label: {
+                        Image(systemName: repo.isTracked ? "star.fill" : "star")
+                            .foregroundStyle(repo.isTracked ? Color.yellow : Color.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(repo.isTracked ? "Tracked — click to stop syncing this repo" : "Track — keep this repo synced")
+                }
                 Button {
                     state.syncRepo(repo.id)
                 } label: {

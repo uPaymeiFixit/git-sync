@@ -62,6 +62,9 @@ struct GitSyncApp: App {
         if args.contains("--scheduler-test") {
             exit(SchedulerTest.run())
         }
+        if args.contains("--whitelist-test") {
+            exit(WhitelistTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the
@@ -125,6 +128,8 @@ struct GitSyncApp: App {
         Settings {
             SettingsWindow()
                 .environmentObject(settings)
+                .environmentObject(state)
+                .environmentObject(inventory)
                 .onChange(of: settings.scheduleMode) { _, _ in state.rescheduleIfNeeded() }
                 .onChange(of: settings.scheduleHours) { _, _ in state.rescheduleIfNeeded() }
                 .onChange(of: settings.scheduleDailyHour) { _, _ in state.rescheduleIfNeeded() }

@@ -38,6 +38,7 @@ private struct PathsTab: View {
 
 private struct PlatformsTab: View {
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var state: AppState
 
     var body: some View {
         Form {
@@ -51,6 +52,7 @@ private struct PlatformsTab: View {
                                    value: $settings.gitlabToken,
                                    prompt: "glpat-…",
                                    generateURL: gitlabTokenURL())
+                FilterModeRow(platform: "gitlab")
                 Text("Token stored in Keychain. Needs `read_api` and `read_repository` scopes. Required — GitLab discovery uses the API directly.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -65,6 +67,7 @@ private struct PlatformsTab: View {
                                    value: $settings.githubToken,
                                    prompt: "ghp_…",
                                    generateURL: URL(string: "https://github.com/settings/tokens/new?scopes=repo&description=GitSync"))
+                FilterModeRow(platform: "github")
                 Text("Token stored in Keychain. Classic PAT needs `repo` scope; fine-grained needs Contents+Metadata read on the org.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -82,6 +85,7 @@ private struct PlatformsTab: View {
                                    value: $settings.bitbucketAppPassword,
                                    prompt: "",
                                    generateURL: URL(string: "https://bitbucket.org/account/settings/app-passwords/new"))
+                FilterModeRow(platform: "bitbucket")
                 Text("App password stored in Keychain. Needs read:repository:bitbucket scope.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -215,6 +219,30 @@ private struct EnabledCheckbox: View {
             set: { skipBinding = !$0 }
         ))
         .toggleStyle(.checkbox)
+    }
+}
+
+// Per-platform sync scope: sync everything (default) vs. only repos the user
+// has tracked (whitelist). Routed through AppState.setFilterMode so flipping
+// to whitelist auto-tracks what's already on disk.
+private struct FilterModeRow: View {
+    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var settings: SettingsStore
+    let platform: String
+
+    var body: some View {
+        Picker("Sync scope", selection: Binding(
+            get: { settings.filterMode(platform: platform) },
+            set: { state.setFilterMode($0, platform: platform) }
+        )) {
+            ForEach(FilterMode.allCases, id: \.self) { mode in
+                Text(mode.displayName).tag(mode)
+            }
+        }
+        if settings.filterMode(platform: platform) == .trackedOnly {
+            Text("Discovers all repos so you can browse them, but only syncs ones you Track (★) in the Repositories window. Repos already on disk were tracked automatically.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

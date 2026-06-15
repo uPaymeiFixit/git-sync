@@ -22,14 +22,16 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
     case error         = "error"
     case notClonedYet  = "not-cloned-yet"   // synthetic; inventory-only
     case notSyncedYet  = "not-synced-yet"   // synthetic; on disk, no sync data
+    case untracked     = "untracked"        // synthetic; on disk but not tracked (whitelist mode)
+    case trackedGone   = "tracked-gone"     // synthetic; tracked, but remote no longer lists it
 
     var isAnomaly: Bool {
         switch self {
         case .updatedDirty, .dirty, .diverged, .branchMissing,
-             .staleOnDisk, .nonGitDir, .error:
+             .staleOnDisk, .nonGitDir, .error, .trackedGone:
             return true
         case .cloned, .updated, .upToDate, .emptyRemote, .skipped, .notClonedYet,
-             .notSyncedYet:
+             .notSyncedYet, .untracked:
             return false
         }
     }
@@ -50,6 +52,8 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .error:                                     return "xmark.octagon"
         case .notClonedYet:                              return "icloud.and.arrow.down"
         case .notSyncedYet:                              return "circle.dashed"
+        case .untracked:                                 return "eye.slash"
+        case .trackedGone:                               return "exclamationmark.arrow.triangle.2.circlepath"
         }
     }
 
@@ -65,6 +69,8 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .error:                          return .red
         case .notClonedYet:                   return .blue
         case .notSyncedYet:                   return .gray
+        case .untracked:                      return .secondary
+        case .trackedGone:                    return .orange
         }
     }
 
@@ -86,6 +92,8 @@ enum SyncStatus: String, Codable, CaseIterable, Sendable {
         case .error:         return "Network, auth, or other failure during sync. See the log for details."
         case .notClonedYet:  return "Remote knows about this repo; it hasn't been cloned locally yet."
         case .notSyncedYet:  return "Found on disk, but no sync has recorded its status yet. Run a sync to populate it."
+        case .untracked:     return "On disk under the sync root, but not in this platform's tracked list (whitelist mode). GitSync leaves it alone — Track it to keep it updated."
+        case .trackedGone:   return "You're tracking this repo, but the remote no longer lists it — deleted, renamed, transferred, or your access was removed. Your local copy is untouched; untrack it or investigate."
         }
     }
 }

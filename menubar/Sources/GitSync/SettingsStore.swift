@@ -37,6 +37,7 @@ final class SettingsStore: ObservableObject {
         static let scheduleDailyMinute    = "scheduleDailyMinute"
         static let lastSuccessfulRun      = "lastSuccessfulRun"       // legacy global (migrated)
         static let lastSuccessByPlatform  = "lastSuccessByPlatform"  // [platform rawValue: Date]
+        static let filterModeByPlatform   = "filterModeByPlatform"   // [platform rawValue: FilterMode raw]
     }
     private enum KKey {
         static let githubToken         = "github_token"
@@ -114,6 +115,18 @@ final class SettingsStore: ObservableObject {
     }
     func lastSuccess(platform: String) -> Date? { lastSuccessByPlatform[platform] }
 
+    // Per-platform filter mode (whitelist vs sync-all). Stored as raw strings
+    // so it round-trips through UserDefaults cleanly. Defaults to .syncAll.
+    @Published var filterModeByPlatform: [String: String] {
+        didSet { UserDefaults.standard.set(filterModeByPlatform, forKey: DKey.filterModeByPlatform) }
+    }
+    func filterMode(platform: String) -> FilterMode {
+        FilterMode(rawValue: filterModeByPlatform[platform] ?? "") ?? .syncAll
+    }
+    func setFilterMode(_ mode: FilterMode, platform: String) {
+        filterModeByPlatform[platform] = mode.rawValue
+    }
+
     // Platforms that are configured AND not skipped — mirrors the engine's
     // enabledPlatforms() gate, but from the settings the scheduler can see.
     var enabledPlatforms: [Platform] {
@@ -181,6 +194,7 @@ final class SettingsStore: ObservableObject {
         } else {
             self.lastSuccessByPlatform = [:]
         }
+        self.filterModeByPlatform = (d.dictionary(forKey: DKey.filterModeByPlatform) as? [String: String]) ?? [:]
         self.githubToken        = Keychain.get(KKey.githubToken) ?? ""
         self.gitlabToken        = Keychain.get(KKey.gitlabToken) ?? ""
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""

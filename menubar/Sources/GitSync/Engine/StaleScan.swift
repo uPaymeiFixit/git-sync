@@ -15,11 +15,16 @@ enum StaleScan {
     // `expected` is the set of dest paths we expect to exist (synced + skipped).
     // Returns outcomes for stale/non-git dirs. `rel` maps a dir to its
     // sync-root-relative path.
+    // `staleStatus` is what an on-disk git repo NOT in `expected` is labelled.
+    // Normally .staleOnDisk (an anomaly: "remote dropped it"). In whitelist
+    // (trackedOnly) mode the engine passes .untracked instead, because an
+    // on-disk repo the user simply hasn't tracked isn't an anomaly.
     static func discoverExtras(
         platformRoot: URL,
         platform: String,
         expected: Set<String>,          // standardized paths
-        rel: (URL) -> String
+        rel: (URL) -> String,
+        staleStatus: SyncStatus = .staleOnDisk
     ) -> [Outcome] {
         let fm = FileManager.default
         var isDir: ObjCBool = false
@@ -31,7 +36,7 @@ enum StaleScan {
             if fm.fileExists(atPath: dir.appendingPathComponent(".git").path, isDirectory: &isDir), isDir.boolValue {
                 var oc: [Outcome] = []
                 if !expected.contains(dir.standardizedFileURL.path) {
-                    oc.append(Outcome(platform: platform, rel: rel(dir), status: .staleOnDisk))
+                    oc.append(Outcome(platform: platform, rel: rel(dir), status: staleStatus))
                 }
                 return (true, oc)
             }
