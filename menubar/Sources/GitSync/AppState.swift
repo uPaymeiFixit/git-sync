@@ -89,7 +89,11 @@ final class AppState: ObservableObject {
         dismissedRunID = lastRun?.id
     }
 
-    func startRun() {
+    // `only` scopes the run to a subset of platforms (the scheduler passes the
+    // platforms that are actually overdue). nil = all enabled platforms (the
+    // manual "Run now" button and any full catch-up). The legacy SyncRunner
+    // path doesn't support scoping, so it always runs everything there.
+    func startRun(only: Set<Platform>? = nil) {
         // Full run is exclusive: refuse if a full run OR any individual sync
         // is already in flight (rule 1). The runner enforces this again as
         // the authoritative gate; this is the UI-side mirror.
@@ -102,7 +106,7 @@ final class AppState: ObservableObject {
         if useNativeEngine {
             Task {
                 await engine.updateSettings(snapshot)
-                await engine.startFullRun()
+                await engine.startFullRun(only: only)
             }
         } else {
             Task {
@@ -266,16 +270,17 @@ final class AppState: ObservableObject {
         activeWorkers = [:]
         history.record(run)
         releaseDrainTimer()
-        // Record a successful completion so the scheduler's catch-up knows we
-        // actually synced (and won't fire a redundant makeup run). "Success" =
-        // every platform that ran exited 0. A VPN-down run where GitLab exits 1
-        // does NOT count, so catch-up will keep trying once the VPN is back.
-        let codes = run.exitCodes.values
-        let allOK = !codes.isEmpty && codes.allSatisfy { $0 == 0 }
-        if allOK {
-            settingsStore.lastSuccessfulRun = run.endedAt
-            scheduler.noteSuccessfulRun()
+        // Record success PER PLATFORM: each platform that exited 0 stamps its
+        // own last-success time. A VPN-down run where GitLab exits 1 stamps
+        // GitHub + Bitbucket (which succeeded) but NOT GitLab — so the
+        // scheduler's per-platform catch-up keeps only GitLab "due" and retries
+        // just it (cheaply, via the reachability probe) until the VPN's back.
+        // exitCode 2 is EXIT_SKIPPED (list-only / nothing-to-do) — also fine.
+        let now = run.endedAt ?? Date()
+        for (platform, code) in run.exitCodes where code == 0 || code == 2 {
+            settingsStore.noteSuccess(platform: platform, at: now)
         }
+        scheduler.noteSuccessfulRun()
     }
 
     private func apply(_ event: SyncEvent) {

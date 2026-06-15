@@ -1,19 +1,21 @@
 import Foundation
 
-// Unit test for the scheduler's catch-up math — the part that decides whether
-// a scheduled run is OVERDUE (the fix for "Mac asleep at midnight never syncs").
-// The trigger plumbing (NSBackgroundActivityScheduler, wake notification) can't
-// be tested headless, but the overdue DECISION is pure date math and is where
-// the correctness lives, so we test that directly.
+// Unit test for the scheduler's PER-PLATFORM catch-up math — the logic that
+// decides which platforms are overdue. This is where the correctness lives
+// (the NSBackgroundActivityScheduler / wake-notification plumbing can't be
+// tested headless). Covers the two headline behaviors:
+//   - "Mac asleep at midnight" → the daily run catches up on wake.
+//   - "VPN down" → only GitLab stays due and retries; GitHub/Bitbucket, having
+//     synced, drop out until their own next fire (no wasteful re-sync).
 //
 //   GitSync --scheduler-test
 //
-// We reimplement the exact mostRecentExpectedFire/overdue logic here against a
-// fixed "now" and assert the missed-run cases catch up and the up-to-date
-// cases stay quiet. (Kept in sync with Scheduler.swift by intent; if that
-// logic changes, update both.)
+// Reimplements mostRecentExpectedFire + duePlatforms against a fixed "now" and
+// a per-platform last-success map. Kept in sync with Scheduler.swift by intent.
 enum SchedulerTest {
     enum Mode { case manual, everyN(Int), dailyAt(Int, Int) }
+    // platforms enabled in the test; last success per platform (nil = never).
+    typealias Successes = [String: Date]
 
     static func run() -> Int32 {
         var failures = 0
@@ -21,7 +23,7 @@ enum SchedulerTest {
             if ok { print("  ok   \(label)") }
             else { failures += 1; print("  FAIL \(label)\(detail.isEmpty ? "" : " — \(detail)")") }
         }
-        print("Scheduler catch-up test")
+        print("Scheduler per-platform catch-up test")
 
         let cal = Calendar.current
         func date(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int) -> Date {
@@ -30,12 +32,13 @@ enum SchedulerTest {
         }
 
         // Mirror of Scheduler.mostRecentExpectedFire(asOf:).
-        func mostRecentExpectedFire(_ mode: Mode, lastSuccessful: Date?, now: Date) -> Date? {
+        func mostRecentExpectedFire(_ mode: Mode, enabled: [String], succ: Successes, now: Date) -> Date? {
             switch mode {
             case .manual: return nil
             case .everyN(let hrs):
-                guard let last = lastSuccessful else { return now }
-                let next = last.addingTimeInterval(TimeInterval(max(1, hrs) * 3600))
+                let successes = enabled.compactMap { succ[$0] }
+                guard successes.count == enabled.count, let oldest = successes.min() else { return now }
+                let next = oldest.addingTimeInterval(TimeInterval(max(1, hrs) * 3600))
                 return next <= now ? next : nil
             case .dailyAt(let h, let mi):
                 var comps = cal.dateComponents([.year,.month,.day], from: now)
@@ -45,56 +48,83 @@ enum SchedulerTest {
                 return cal.date(byAdding: .day, value: -1, to: todayFire)
             }
         }
-        // Mirror of fireIfDue()'s decision.
-        func isDue(_ mode: Mode, lastSuccessful: Date?, now: Date) -> Bool {
-            guard let due = mostRecentExpectedFire(mode, lastSuccessful: lastSuccessful, now: now) else { return false }
-            return lastSuccessful == nil || lastSuccessful! < due
+        // Mirror of Scheduler.duePlatforms(asOf:).
+        func duePlatforms(_ mode: Mode, enabled: [String], succ: Successes, now: Date) -> Set<String> {
+            guard let due = mostRecentExpectedFire(mode, enabled: enabled, succ: succ, now: now) else { return [] }
+            var out = Set<String>()
+            for p in enabled {
+                let last = succ[p]
+                if last == nil || last! < due { out.insert(p) }
+            }
+            return out
         }
 
-        // ---- THE headline scenario: daily at 00:00, Mac asleep at midnight,
-        // user opens laptop at 08:00. Last good run was yesterday morning. ----
+        let all = ["gitlab", "github", "bitbucket"]
+
+        // ---- HEADLINE 1: daily@midnight, asleep through midnight, open 8am.
+        // All three last synced yesterday morning → all three due. ----
         let now0800 = date(2026, 6, 16, 8, 0)
-        let yesterdayMorning = date(2026, 6, 15, 7, 30)
-        check("daily@midnight: overdue when opened at 8am (asleep through midnight)",
-              isDue(.dailyAt(0, 0), lastSuccessful: yesterdayMorning, now: now0800))
+        let yMorning = date(2026, 6, 15, 7, 30)
+        let allYesterday: Successes = ["gitlab": yMorning, "github": yMorning, "bitbucket": yMorning]
+        check("daily@midnight: all 3 due when opened at 8am after sleeping through",
+              duePlatforms(.dailyAt(0,0), enabled: all, succ: allYesterday, now: now0800) == Set(all))
 
-        // Already ran AFTER today's midnight fire → NOT due.
-        let ranAt0030 = date(2026, 6, 16, 0, 30)
-        check("daily@midnight: not due if already ran after midnight today",
-              !isDue(.dailyAt(0, 0), lastSuccessful: ranAt0030, now: now0800))
+        // ---- HEADLINE 2 (the VPN-down core): after the 8am catch-up run,
+        // GitHub+Bitbucket succeeded at 08:01 but GitLab failed (still yesterday).
+        // On the next heartbeat, ONLY gitlab should be due. ----
+        let now0830 = date(2026, 6, 16, 8, 30)
+        let ghbbOK: Successes = [
+            "gitlab": yMorning,                  // VPN down → never updated
+            "github": date(2026, 6, 16, 8, 1),
+            "bitbucket": date(2026, 6, 16, 8, 1),
+        ]
+        check("VPN-down: only GitLab due after GitHub/Bitbucket succeeded",
+              duePlatforms(.dailyAt(0,0), enabled: all, succ: ghbbOK, now: now0830) == ["gitlab"])
 
-        // Daily at 09:00 but it's only 08:00 → today's fire hasn't come; the
-        // relevant fire is YESTERDAY 09:00; last run was yesterday 07:30
-        // (before it) → still due (yesterday's 9am run was also missed).
-        check("daily@9am: due at 8am if last run predates yesterday's 9am",
-              isDue(.dailyAt(9, 0), lastSuccessful: yesterdayMorning, now: now0800))
+        // ---- After VPN returns and GitLab finally syncs, nobody is due. ----
+        let allOKToday: Successes = [
+            "gitlab": date(2026, 6, 16, 9, 0),
+            "github": date(2026, 6, 16, 8, 1),
+            "bitbucket": date(2026, 6, 16, 8, 1),
+        ]
+        let now1000 = date(2026, 6, 16, 10, 0)
+        check("nothing due once all 3 synced after today's midnight fire",
+              duePlatforms(.dailyAt(0,0), enabled: all, succ: allOKToday, now: now1000).isEmpty)
 
-        // Daily at 09:00, last run was yesterday 10:00 (after yesterday's 9am),
-        // now 08:00 today (before today's 9am) → most-recent fire is yest 9am,
-        // last run (yest 10am) is after it → NOT due yet.
-        let yest1000 = date(2026, 6, 15, 10, 0)
-        check("daily@9am: not due before today's fire if last run was after yesterday's",
-              !isDue(.dailyAt(9, 0), lastSuccessful: yest1000, now: now0800))
-
-        // ---- every-N-hours ----
+        // ---- every-4h, only GitLab stale (synced 5h ago), others 1h ago.
+        // Most-recent fire anchors on the OLDEST (gitlab, 5h) → fire is in the
+        // past → gitlab due; github/bitbucket synced after it → not due. ----
         let now = date(2026, 6, 16, 12, 0)
-        check("every-4h: due when last run was 5h ago",
-              isDue(.everyN(4), lastSuccessful: now.addingTimeInterval(-5*3600), now: now))
-        check("every-4h: NOT due when last run was 1h ago",
-              !isDue(.everyN(4), lastSuccessful: now.addingTimeInterval(-1*3600), now: now))
-        check("every-4h: due immediately when never run before",
-              isDue(.everyN(4), lastSuccessful: nil, now: now))
+        let mixed: Successes = [
+            "gitlab": now.addingTimeInterval(-5*3600),
+            "github": now.addingTimeInterval(-1*3600),
+            "bitbucket": now.addingTimeInterval(-1*3600),
+        ]
+        check("every-4h: only the stale platform (gitlab 5h) is due",
+              duePlatforms(.everyN(4), enabled: all, succ: mixed, now: now) == ["gitlab"])
 
-        // ---- manual ----
-        check("manual: never due",
-              !isDue(.manual, lastSuccessful: nil, now: now))
+        // ---- every-4h, all fresh (1h ago) → none due. ----
+        let allFresh: Successes = Dictionary(uniqueKeysWithValues: all.map { ($0, now.addingTimeInterval(-3600)) })
+        check("every-4h: none due when all synced 1h ago",
+              duePlatforms(.everyN(4), enabled: all, succ: allFresh, now: now).isEmpty)
 
-        // ---- never-run daily ----
-        check("daily: due if never run (lastSuccessful nil)",
-              isDue(.dailyAt(0, 0), lastSuccessful: nil, now: now0800))
+        // ---- never-run platform is due immediately. ----
+        let neverGitlab: Successes = ["github": now.addingTimeInterval(-600), "bitbucket": now.addingTimeInterval(-600)]
+        check("every-4h: a never-synced platform is due now",
+              duePlatforms(.everyN(4), enabled: all, succ: neverGitlab, now: now).contains("gitlab"))
+
+        // ---- manual: nothing ever due. ----
+        check("manual: nothing due",
+              duePlatforms(.manual, enabled: all, succ: allYesterday, now: now0800).isEmpty)
+
+        // ---- a disabled platform (not in `enabled`) is never due even if
+        // it has no success record. ----
+        let twoOnly = ["github", "bitbucket"]
+        check("disabled platform not considered (bitbucket-less enabled set)",
+              !duePlatforms(.dailyAt(0,0), enabled: twoOnly, succ: ghbbOK, now: now0830).contains("gitlab"))
 
         print()
-        if failures == 0 { print("Scheduler catch-up test passed."); return 0 }
+        if failures == 0 { print("Scheduler per-platform catch-up test passed."); return 0 }
         print("\(failures) check(s) failed."); return 1
     }
 }

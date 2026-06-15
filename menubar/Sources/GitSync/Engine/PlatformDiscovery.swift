@@ -23,8 +23,50 @@ struct DiscoveryResult: Sendable {
 // Common protocol; each platform is a Sendable value built from settings.
 protocol PlatformDiscovery: Sendable {
     var platform: Platform { get }
+    // The base URL to probe for reachability before the (expensive) discovery.
+    // A short-timeout connect here fails fast (~seconds) when the host is
+    // unreachable — e.g. GitLab when the VPN is down — instead of letting
+    // discoverAll grind through 5 × 60s connect timeouts (~5 min).
+    var probeURL: URL? { get }
     func discoverAll(skip: SkipMatcher) -> DiscoveryResult
     func discoverOne(rel: String) -> DiscoveredRepo?
+}
+
+// Fast reachability probe: can we open a connection to `url` within `timeout`
+// seconds? Uses a HEAD request and treats ANY HTTP response (even 401/404) as
+// "reachable" — we only care whether the host answered, not whether we're
+// authorized. A connection-level failure (VPN down, DNS, refused) → false.
+func hostReachable(_ url: URL, timeout: TimeInterval = 8) -> Bool {
+    var req = URLRequest(url: url, timeoutInterval: timeout)
+    req.httpMethod = "HEAD"
+    // Mutable box for the URLSession completion handler. The semaphore provides
+    // the happens-before barrier (signal after the write, read after wait), so
+    // @unchecked Sendable is sound here — matches HTTPClient.ResponseBox.
+    final class Box: @unchecked Sendable { var ok = false }
+    let box = Box()
+    let sem = DispatchSemaphore(value: 0)
+    let cfg = URLSessionConfiguration.ephemeral
+    cfg.timeoutIntervalForRequest = timeout
+    cfg.timeoutIntervalForResource = timeout
+    let task = URLSession(configuration: cfg).dataTask(with: req) { _, resp, err in
+        // Any HTTP response means the host answered. Only a transport error
+        // (no response) counts as unreachable.
+        if resp != nil { box.ok = true }
+        else if err == nil { box.ok = true }
+        sem.signal()
+    }
+    task.resume()
+    // The URLSession itself enforces `timeout` and always fires the handler
+    // (success or error) at/after the deadline, so the semaphore is guaranteed
+    // to be signalled. Wait a hair past the session timeout (a fixed +1s for
+    // handler-dispatch latency, not a second full timeout) purely as a
+    // belt-and-suspenders deadlock guard; if it ever trips we cancel the task
+    // so nothing dangles.
+    if sem.wait(timeout: .now() + timeout + 1) == .timedOut {
+        task.cancel()
+        return false
+    }
+    return box.ok
 }
 
 // Port of matches_skip — comma-separated GIT_SYNC_SKIP patterns matched as
@@ -59,6 +101,10 @@ struct GitLabClient: PlatformDiscovery {
     private var platformRoot: URL { syncRoot.appendingPathComponent("Gitlab") }
     private let accept = "application/json"
     private var headers: [String: String] { ["PRIVATE-TOKEN": token] }
+
+    // GitLab is the one behind the VPN, so this probe is what makes a VPN-down
+    // retry cheap: /api/v4/version answers instantly when reachable.
+    var probeURL: URL? { URL(string: "https://\(host)/api/v4/version") }
 
     func discoverAll(skip: SkipMatcher) -> DiscoveryResult {
         var result = DiscoveryResult()
@@ -199,6 +245,7 @@ struct GitHubClient: PlatformDiscovery {
     let syncRoot: URL
 
     private let api = "https://api.github.com"
+    var probeURL: URL? { URL(string: api) }
     private var platformRoot: URL { syncRoot.appendingPathComponent("Github") }
     private var authHeader: String { "Bearer \(token)" }
     private let accept = "application/vnd.github+json"
@@ -279,6 +326,7 @@ struct BitbucketClient: PlatformDiscovery {
     let syncRoot: URL
 
     private let api = "https://api.bitbucket.org/2.0"
+    var probeURL: URL? { URL(string: api) }
     private var platformRoot: URL { syncRoot.appendingPathComponent("Bitbucket") }
     private let accept = "application/json"
     private var headers: [String: String] {

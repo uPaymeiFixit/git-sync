@@ -18,12 +18,14 @@ import AppKit
 //      next heartbeat.
 //   3. Launch (start()) — catch a run that came due while the app was quit.
 //
-// fireIfDue() is wall-clock based: it computes the schedule's most recent
-// expected fire time and compares it to settings.lastSuccessfulRun. If we
-// haven't had a clean run since that expected fire, we're overdue → run now.
-// Because it keys off persisted lastSuccessfulRun (not a volatile in-memory
-// fire date), it survives quit/sleep/off: whenever the app is next alive, the
-// first trigger notices the miss and catches up.
+// fireIfDue() is wall-clock based AND per-platform: it computes the schedule's
+// most recent expected fire time, then asks each enabled platform "have you
+// synced since then?" (settings.lastSuccess(platform:), persisted). It runs
+// ONLY the platforms that haven't — so a VPN-down GitLab stays due and retries
+// (cheaply, via the reachability probe) while GitHub/Bitbucket, having synced,
+// drop out until their own next fire. Because it keys off persisted per-
+// platform success (not a volatile in-memory fire date), it survives
+// quit/sleep/off: whenever the app is next alive, the first trigger catches up.
 //
 // Nothing runs while the Mac is fully OFF — no userspace scheduler can — but
 // the run fires on the next launch/wake instead of being lost forever.
@@ -98,38 +100,55 @@ final class Scheduler {
         // the next fireIfDue() will see it and stay quiet until next due.
     }
 
-    // The heart of catch-up: is a scheduled run overdue right now?
+    // The heart of catch-up: which platforms are overdue right now? Runs only
+    // those. A VPN-down GitLab stays due (cheap probe each retry) while
+    // GitHub/Bitbucket, having synced, drop out until their own next fire.
     func fireIfDue() {
         guard let state else { return }
         guard settings.scheduleMode != .manualOnly else { return }
         // Don't stack a makeup run on top of one already going.
         guard !state.isRunning else { return }
-        guard let due = mostRecentExpectedFire(asOf: Date()) else { return }
 
-        let last = settings.lastSuccessfulRun
-        if last == nil || last! < due {
-            state.startRun()
+        let due = duePlatforms(asOf: Date())
+        guard !due.isEmpty else { return }
+        state.startRun(only: due)
+    }
+
+    // The set of enabled platforms whose most-recent expected fire has passed
+    // without a successful sync since.
+    func duePlatforms(asOf now: Date) -> Set<Platform> {
+        guard let due = mostRecentExpectedFire(asOf: now) else { return [] }
+        var out = Set<Platform>()
+        for p in settings.enabledPlatforms {
+            let last = settings.lastSuccess(platform: p.rawValue)
+            if last == nil || last! < due { out.insert(p) }
         }
+        return out
     }
 
     // For the current schedule, the most recent moment a run "should have"
-    // happened on or before `now`. Catch-up fires if we haven't had a clean
-    // run since this instant. Returns nil for manualOnly.
+    // happened on or before `now`. Returns nil for manualOnly.
+    //
+    // NOTE on every-N-hours anchoring: we anchor to the EARLIEST platform
+    // success (min across platforms) so the interval reflects "it's been N
+    // hours since the oldest platform synced". Per-platform due-ness is then
+    // decided in duePlatforms by comparing each platform's own last-success to
+    // this fire instant — so a platform that synced recently isn't dragged in.
     func mostRecentExpectedFire(asOf now: Date) -> Date? {
         let cal = Calendar.current
         switch settings.scheduleMode {
         case .manualOnly:
             return nil
         case .everyNHours:
-            // Anchor every-N-hours to the last successful run if we have one
-            // (so "every 4h" means 4h after the last sync), else treat as
-            // immediately due.
             let hours = TimeInterval(max(1, settings.scheduleHours) * 3600)
-            guard let last = settings.lastSuccessfulRun else { return now }
-            let next = last.addingTimeInterval(hours)
-            return next <= now ? next : nil  // not yet due → nil
+            let successes = settings.enabledPlatforms.compactMap { settings.lastSuccess(platform: $0.rawValue) }
+            // If any enabled platform has never synced, something is due now.
+            guard successes.count == settings.enabledPlatforms.count, let oldest = successes.min() else {
+                return now
+            }
+            let next = oldest.addingTimeInterval(hours)
+            return next <= now ? next : nil  // nothing due yet
         case .dailyAt:
-            // The most recent occurrence of HH:MM at or before now.
             var comps = cal.dateComponents([.year, .month, .day], from: now)
             comps.hour = settings.scheduleDailyHour
             comps.minute = settings.scheduleDailyMinute
@@ -149,7 +168,8 @@ final class Scheduler {
             return nil
         case .everyNHours:
             let hours = TimeInterval(max(1, settings.scheduleHours) * 3600)
-            let base = settings.lastSuccessfulRun ?? now
+            let successes = settings.enabledPlatforms.compactMap { settings.lastSuccess(platform: $0.rawValue) }
+            let base = successes.min() ?? now
             let next = base.addingTimeInterval(hours)
             return next > now ? next : now
         case .dailyAt:

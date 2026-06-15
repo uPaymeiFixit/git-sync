@@ -35,7 +35,8 @@ final class SettingsStore: ObservableObject {
         static let scheduleHours          = "scheduleHours"
         static let scheduleDailyHour      = "scheduleDailyHour"
         static let scheduleDailyMinute    = "scheduleDailyMinute"
-        static let lastSuccessfulRun      = "lastSuccessfulRun"
+        static let lastSuccessfulRun      = "lastSuccessfulRun"       // legacy global (migrated)
+        static let lastSuccessByPlatform  = "lastSuccessByPlatform"  // [platform rawValue: Date]
     }
     private enum KKey {
         static let githubToken         = "github_token"
@@ -98,12 +99,29 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(scheduleDailyMinute, forKey: DKey.scheduleDailyMinute) }
     }
 
-    // When the last FULL run completed successfully (all enabled platforms
-    // exit 0). Drives missed-run catch-up: the scheduler compares this against
-    // the schedule's expected previous fire to decide whether a run is overdue
-    // (e.g. the Mac was asleep at midnight). nil = never completed a clean run.
-    @Published var lastSuccessfulRun: Date? {
-        didSet { UserDefaults.standard.set(lastSuccessfulRun, forKey: DKey.lastSuccessfulRun) }
+    // When each platform last synced successfully (exit 0), keyed by platform
+    // rawValue. Drives PER-PLATFORM missed-run catch-up: the scheduler asks,
+    // for each platform, "have you synced since your expected fire?" — so a
+    // VPN-down GitLab stays due and retries cheaply while GitHub/Bitbucket,
+    // having succeeded, go idle until their own next fire. Persisted as a
+    // [String: Date] dict.
+    @Published var lastSuccessByPlatform: [String: Date] {
+        didSet { UserDefaults.standard.set(lastSuccessByPlatform, forKey: DKey.lastSuccessByPlatform) }
+    }
+
+    func noteSuccess(platform: String, at date: Date) {
+        lastSuccessByPlatform[platform] = date
+    }
+    func lastSuccess(platform: String) -> Date? { lastSuccessByPlatform[platform] }
+
+    // Platforms that are configured AND not skipped — mirrors the engine's
+    // enabledPlatforms() gate, but from the settings the scheduler can see.
+    var enabledPlatforms: [Platform] {
+        var out: [Platform] = []
+        if !skipGitlab,    !gitlabHost.isEmpty         { out.append(.gitlab) }
+        if !skipGithub,    !githubOrg.isEmpty          { out.append(.github) }
+        if !skipBitbucket, !bitbucketWorkspace.isEmpty { out.append(.bitbucket) }
+        return out
     }
 
     // ---- Keychain-backed secrets --------------------------------------
@@ -142,7 +160,27 @@ final class SettingsStore: ObservableObject {
         self.scheduleHours      = d.object(forKey: DKey.scheduleHours) as? Int ?? 4
         self.scheduleDailyHour  = d.object(forKey: DKey.scheduleDailyHour) as? Int ?? 9
         self.scheduleDailyMinute = d.object(forKey: DKey.scheduleDailyMinute) as? Int ?? 0
-        self.lastSuccessfulRun  = d.object(forKey: DKey.lastSuccessfulRun) as? Date
+        // Per-platform last-success, migrating a legacy global value if present
+        // (seed the ENABLED platforms with it so the first post-upgrade run
+        // doesn't think everything is overdue — disabled platforms are left out
+        // since their timestamp would just be dead weight).
+        if let dict = d.dictionary(forKey: DKey.lastSuccessByPlatform) as? [String: Date] {
+            self.lastSuccessByPlatform = dict
+        } else if let legacy = d.object(forKey: DKey.lastSuccessfulRun) as? Date {
+            // Read the enabled-state straight from UserDefaults (can't touch
+            // self.* here — still mid-init). Mirror the same gates the host/
+            // skip fields were just loaded from above.
+            var seed: [String: Date] = [:]
+            let glHost = d.string(forKey: DKey.gitlabHost) ?? "gitlabdev.paciolan.info"
+            let ghOrg  = d.string(forKey: DKey.githubOrg) ?? "Paciolan"
+            let bbWs   = d.string(forKey: DKey.bitbucketWorkspace) ?? "paciolan"
+            if !d.bool(forKey: DKey.skipGitlab),    !glHost.isEmpty { seed["gitlab"] = legacy }
+            if !d.bool(forKey: DKey.skipGithub),    !ghOrg.isEmpty  { seed["github"] = legacy }
+            if !d.bool(forKey: DKey.skipBitbucket), !bbWs.isEmpty   { seed["bitbucket"] = legacy }
+            self.lastSuccessByPlatform = seed
+        } else {
+            self.lastSuccessByPlatform = [:]
+        }
         self.githubToken        = Keychain.get(KKey.githubToken) ?? ""
         self.gitlabToken        = Keychain.get(KKey.gitlabToken) ?? ""
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""

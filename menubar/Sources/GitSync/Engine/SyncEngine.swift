@@ -60,18 +60,21 @@ actor SyncEngine {
     private var parallel: Int { Int(env["GIT_SYNC_PARALLEL"] ?? "128") ?? 128 }
     private var skip: SkipMatcher { SkipMatcher(env["GIT_SYNC_SKIP"] ?? "") }
 
-    // ---- Full run: all enabled platforms, exclusive ----
+    // ---- Full run: enabled platforms, exclusive ----
     // listOnly = discover + emit remote_project events, then stop without
     // cloning/fetching anything (inventory refresh; also the safe way to
     // exercise discovery in tests).
-    func startFullRun(listOnly: Bool = false) {
+    // `only` scopes the run to a subset of platforms (used by the scheduler's
+    // per-platform catch-up so a VPN-down GitLab retry doesn't drag GitHub /
+    // Bitbucket along). nil = all enabled platforms (the manual "Run now").
+    func startFullRun(listOnly: Bool = false, only: Set<Platform>? = nil) {
         guard !isRunning else { return }   // rule 1: exclusive against everything
         fullRunActive = true
         aborted = false
         abortBox.reset()
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.runFull(listOnly: listOnly)
+            await self.runFull(listOnly: listOnly, only: only)
         }
         fullRunTask = task
     }
@@ -215,8 +218,17 @@ actor SyncEngine {
         return outcome
     }
 
-    private func runFull(listOnly: Bool = false) async {
-        let platforms = enabledPlatforms()
+    private func runFull(listOnly: Bool = false, only: Set<Platform>? = nil) async {
+        var platforms = enabledPlatforms()
+        if let only { platforms = platforms.filter { only.contains($0) } }
+        // No platforms to run (e.g. an empty `only` filter, or nothing enabled):
+        // finish cleanly and tear down the run state rather than dangling with
+        // fullRunActive=true. allFinished() lets AppState finalize the empty run.
+        if platforms.isEmpty {
+            await sink.allFinished()
+            clearFullRun()
+            return
+        }
         let mux = SSHMultiplexer(parallel: parallel,
                                  pid: ProcessInfo.processInfo.processIdentifier,
                                  uid: getuid(),
@@ -227,8 +239,25 @@ actor SyncEngine {
         var perPlatformComplete: [Platform: Bool] = [:]
         for platform in platforms {
             if aborted { break }
-            await sink.emit(.phase(label: "Discovering \(platform.titleName)…"))
             let client = makeClient(platform)
+            // Fast reachability probe before the expensive discovery. If the
+            // host doesn't answer within a few seconds (e.g. GitLab while the
+            // VPN is down), fail this platform NOW instead of grinding through
+            // discovery's 5 × 60s connect timeouts. Per-platform: a down GitLab
+            // doesn't touch GitHub / Bitbucket. The scheduler's per-platform
+            // catch-up then keeps only the unreachable platform "due", so its
+            // 30-min retry is just this ~8s probe — not a full re-sync.
+            if let probe = client.probeURL {
+                await sink.emit(.phase(label: "Checking \(platform.titleName)…"))
+                if !hostReachable(probe) {
+                    perPlatformComplete[platform] = false
+                    await sink.logLine("\(platform.titleName) unreachable (host did not respond — VPN down?)",
+                                       platform: platform.rawValue)
+                    await sink.platformFinished(platform.rawValue, exitCode: 1)
+                    continue
+                }
+            }
+            await sink.emit(.phase(label: "Discovering \(platform.titleName)…"))
             let result = client.discoverAll(skip: skip)
             perPlatformComplete[platform] = (result.fatalError == nil)
             if let fatal = result.fatalError {
