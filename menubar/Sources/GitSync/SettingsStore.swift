@@ -142,26 +142,39 @@ final class SettingsStore: ObservableObject {
     // directory + Python interpreter are app-bundle-relative and not
     // user-controllable.
     var currentSyncSettings: SyncSettings {
-        var env: [String: String] = [
-            "GIT_SYNC_ROOT": syncRoot,
-        ]
-        if !gitlabHost.isEmpty            { env["GITLAB_HOST"] = gitlabHost }
-        if !githubOrg.isEmpty             { env["GIT_SYNC_GITHUB_ORG"] = githubOrg }
-        if !bitbucketWorkspace.isEmpty    { env["GIT_SYNC_BITBUCKET_WORKSPACE"] = bitbucketWorkspace }
-        if !bitbucketUser.isEmpty         { env["GIT_SYNC_BITBUCKET_USER"] = bitbucketUser }
-        if !bitbucketAppPassword.isEmpty  { env["GIT_SYNC_BITBUCKET_APP_PASSWORD"] = bitbucketAppPassword }
-        if !githubToken.isEmpty           { env["GIT_SYNC_GITHUB_TOKEN"] = githubToken }
-        // glab reads GITLAB_TOKEN from env when no glab-cli config exists,
-        // so passing this through lets the bundled glab authenticate
-        // without the user running `glab auth login`. If a token isn't
-        // configured, we let glab fall back to its config (the user may
-        // have already authed via the CLI).
-        if !gitlabToken.isEmpty           { env["GITLAB_TOKEN"] = gitlabToken }
-        if !skipPatterns.isEmpty          { env["GIT_SYNC_SKIP"] = skipPatterns }
-        if skipBitbucket                  { env["GIT_SYNC_SKIP_BITBUCKET"] = "1" }
-        if skipGitlab                     { env["GIT_SYNC_SKIP_GITLAB"] = "1" }
-        if skipGithub                     { env["GIT_SYNC_SKIP_GITHUB"] = "1" }
-        if includeArchived                { env["GIT_SYNC_INCLUDE_ARCHIVED"] = "1" }
+        // Start from the inherited process environment, then overlay our
+        // GIT_SYNC_* config. Process.environment REPLACES the child's env
+        // wholesale, so if we built this dict from scratch the git children
+        // would run with NO HOME / PATH / XDG_CONFIG_HOME. The visible symptom
+        // was repos that have a .DS_Store showing as "dirty": without HOME,
+        // git can't find ~/.config/git/ignore (which ignores .DS_Store), so it
+        // reports the file as untracked. The same stripping would also break
+        // git's credential helpers, hooks, and user ssh config — inherit the
+        // real environment so git behaves exactly as it does in a shell.
+        var env = ProcessInfo.processInfo.environment
+        // The Settings UI is authoritative: explicitly set keys when the
+        // setting is present and REMOVE them when it isn't, so a GIT_SYNC_*
+        // var inherited from the launching shell (e.g. a sourced .envrc) can't
+        // silently override the UI. set(_:_:) writes or clears accordingly.
+        func set(_ key: String, _ value: String?) {
+            if let value, !value.isEmpty { env[key] = value } else { env[key] = nil }
+        }
+        set("GIT_SYNC_ROOT", syncRoot)
+        set("GITLAB_HOST", gitlabHost)
+        set("GIT_SYNC_GITHUB_ORG", githubOrg)
+        set("GIT_SYNC_BITBUCKET_WORKSPACE", bitbucketWorkspace)
+        set("GIT_SYNC_BITBUCKET_USER", bitbucketUser)
+        set("GIT_SYNC_BITBUCKET_APP_PASSWORD", bitbucketAppPassword)
+        set("GIT_SYNC_GITHUB_TOKEN", githubToken)
+        // glab reads GITLAB_TOKEN from env when no glab-cli config exists, so
+        // passing this through lets the bundled glab authenticate without the
+        // user running `glab auth login`.
+        set("GITLAB_TOKEN", gitlabToken)
+        set("GIT_SYNC_SKIP", skipPatterns)
+        set("GIT_SYNC_SKIP_BITBUCKET", skipBitbucket ? "1" : nil)
+        set("GIT_SYNC_SKIP_GITLAB", skipGitlab ? "1" : nil)
+        set("GIT_SYNC_SKIP_GITHUB", skipGithub ? "1" : nil)
+        set("GIT_SYNC_INCLUDE_ARCHIVED", includeArchived ? "1" : nil)
         env["GIT_SYNC_PARALLEL"] = String(parallel)
         env["GIT_SYNC_TIMEOUT"] = String(timeout)
         env["GIT_SYNC_DEPTH"] = String(depth)

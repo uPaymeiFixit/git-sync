@@ -249,17 +249,21 @@ enum RepoSyncer {
         guard r.code == 0 else { return false }
         if r.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
 
-        // Non-empty status. Before trusting it, rule out a "racy index" false
-        // positive: when a tracked file's mtime can't disambiguate it from the
-        // index (e.g. just-written by the fetch/checkout we ran moments ago),
-        // git's stat-only check reports it as possibly-modified. The canonical
-        // resolution is to refresh the stat cache (which compares CONTENT for
-        // the ambiguous entries) and re-check. This is what a second `git
-        // status` would do on its own. Observed in production: 14 GitHub repos
-        // flagged dirty/updated-dirty mid-sync that were provably clean on disk
-        // immediately after (git status --porcelain empty). `update-index
-        // --refresh` exits non-zero when it finds real modifications, so we
-        // can't gate on its exit code — re-run porcelain as the authority.
+        // Non-empty status. Before trusting it, refresh the stat cache and
+        // re-check, to rule out a "racy index" false positive (a tracked file
+        // whose mtime can't disambiguate it from the index — e.g. just written
+        // by the fetch we ran moments ago — gets reported as possibly-modified
+        // by the stat-only check, then clears on the next status). This is what
+        // a second `git status` does on its own. `update-index --refresh` exits
+        // non-zero when it finds real modifications, so we can't gate on its
+        // exit code — re-run porcelain as the authority.
+        //
+        // NOTE: the original "14 GitHub repos always dirty" report was NOT this
+        // — it was untracked .DS_Store files the git children couldn't ignore
+        // because they ran with no HOME (so ~/.config/git/ignore was invisible).
+        // That's fixed at the source in SettingsStore.currentSyncSettings (the
+        // env now inherits HOME). This refresh stays as cheap defense for the
+        // genuine racy-stat case.
         _ = GitRunner.git(path, "update-index", "-q", "--refresh", env: env)
         let r2 = GitRunner.git(path, "status", "--porcelain", env: env)
         guard r2.code == 0 else { return false }
