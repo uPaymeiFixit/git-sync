@@ -59,10 +59,14 @@ enum GitRunner {
         p.standardOutput = pipe
         p.standardError = pipe
         do { try p.run() } catch {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
             return (-1, "command not found: \(program): \(error.localizedDescription)")
         }
+        try? pipe.fileHandleForWriting.close()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        try? pipe.fileHandleForReading.close()
         return (p.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
@@ -76,10 +80,18 @@ enum GitRunner {
         p.standardOutput = pipe
         p.standardError = pipe   // combined, like _git's stderr=STDOUT
         do { try p.run() } catch {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
             return (-1, "command not found: \(error.localizedDescription)")
         }
+        // Reclaim the pipe FDs (the read-end close below is the load-bearing
+        // one — see runStreamingOnce for the full FD-exhaustion → EBADF
+        // rationale). The write-end close is a defensive no-op: Foundation
+        // already closed the parent's copy on spawn.
+        try? pipe.fileHandleForWriting.close()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        try? pipe.fileHandleForReading.close()
         return (p.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
@@ -182,9 +194,24 @@ enum GitRunner {
         p.terminationHandler = { _ in exited.store(true, ordering: .releasing) }
 
         do { try p.run() } catch {
+            // run() failed — close both pipe ends so a spawn failure (e.g. FD
+            // exhaustion) doesn't itself leak the two FDs we just allocated.
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
             return GitResult(ok: false, output: "command not found: \(error.localizedDescription)",
                              timedOut: false, aborted: false)
         }
+
+        // Close the pipe ends to reclaim FDs. The read-end close (defer) is the
+        // load-bearing one: without it we leaked 1 FD/call, and against
+        // launchd's 256 soft limit × thousands of repos that exhausted the
+        // table → Process.run() failed with EBADF "Bad file descriptor" (the
+        // 919-error storm). The write-end close is defensive: Foundation's
+        // Process.run() already closes the parent's copy on spawn, so this is
+        // an idempotent no-op on the happy path (NOT the EOF mechanism — that's
+        // the `exited` flag above). The defer covers every return path.
+        try? pipe.fileHandleForWriting.close()
+        defer { try? pipe.fileHandleForReading.close() }
 
         let readFD = pipe.fileHandleForReading.fileDescriptor
         let deadline = Date().addingTimeInterval(timeout)
@@ -226,6 +253,17 @@ enum GitRunner {
                 if p.isRunning { p.terminate() }
                 break
             }
+            // If git has already exited, drain the rest and stop NOW — don't
+            // enter another select slice. Checked at the TOP (like Python's
+            // proc.poll() each iteration) so a fast child that exits between
+            // slices doesn't cost us a full slice of latency per call. (Real
+            // clones stream output so this rarely fires mid-loop, but a
+            // sub-100ms fetch on an up-to-date repo would otherwise pay a
+            // slice.)
+            if exited.load(ordering: .acquiring) {
+                _ = readAvailable()
+                break
+            }
             let remaining = deadline.timeIntervalSinceNow
             if remaining <= 0 {
                 timedOut = true
@@ -235,7 +273,12 @@ enum GitRunner {
             var readSet = fd_set()
             __darwin_fd_set(readFD, &readSet)
             var tv = timeval(tv_sec: 0, tv_usec: 0)
-            let waitSecs = min(0.5, remaining)
+            // 0.1s slice (Python uses 0.5): bounds how long we sleep past git's
+            // exit when it happens DURING a select (the top-of-loop check
+            // catches exits BETWEEN slices). Keeps a silent fast child from
+            // costing 0.5s, and makes abort/timeout checks 10x/s. Negligible
+            // CPU — select sleeps, it doesn't spin.
+            let waitSecs = min(0.1, remaining)
             tv.tv_sec = Int(waitSecs)
             tv.tv_usec = __darwin_suseconds_t((waitSecs - Double(tv.tv_sec)) * 1_000_000)
             let sel = select(readFD + 1, &readSet, nil, nil, &tv)

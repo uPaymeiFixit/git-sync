@@ -120,10 +120,15 @@ enum RepoTrasher {
         do {
             try process.run()
         } catch {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
             return nil
         }
+        // Reclaim the pipe FDs (see GitRunner for the FD-exhaustion rationale).
+        try? pipe.fileHandleForWriting.close()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        try? pipe.fileHandleForReading.close()
         guard process.terminationStatus == 0 else { return nil }
         return String(decoding: data, as: UTF8.self)
     }

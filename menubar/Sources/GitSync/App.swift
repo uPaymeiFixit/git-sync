@@ -8,6 +8,14 @@ struct GitSyncApp: App {
     @StateObject private var state: AppState
 
     init() {
+        // Raise the open-file-descriptor soft limit FIRST. A GUI app launched
+        // by launchd inherits maxfiles=256, which is far too low for 128
+        // concurrent git+ssh workers — even without a leak, a big run brushes
+        // against it and Process.run() starts failing with EBADF ("Bad file
+        // descriptor"). Bump toward the hard limit. Belt to the FD-close fixes
+        // in GitRunner (suspenders).
+        GitSyncApp.raiseFDLimit()
+
         // CLI-mode entry points. Detected at startup so we don't spin up a
         // GUI for tooling commands.
         let args = CommandLine.arguments.dropFirst()
@@ -48,6 +56,9 @@ struct GitSyncApp: App {
         if args.contains("--stream-eof-test") {
             exit(StreamEofTest.run())
         }
+        if args.contains("--fd-leak-test") {
+            exit(FDLeakTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the
@@ -71,6 +82,24 @@ struct GitSyncApp: App {
             let syncRoot = URL(fileURLWithPath:
                 (settingsStore.syncRoot as NSString).expandingTildeInPath)
             await inventoryStore.seedFromDisk(syncRoot: syncRoot)
+        }
+    }
+
+    // Raise RLIMIT_NOFILE toward the hard cap. launchd hands GUI apps a soft
+    // limit of 256; 128 parallel git+ssh workers need far more headroom.
+    static func raiseFDLimit() {
+        // RLIM_INFINITY is a C macro (a cast expression) Swift can't import;
+        // inline its value: (1<<63)-1.
+        let rlimInfinity = rlim_t(bitPattern: Int64.max)
+        var lim = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { return }
+        // OPEN_MAX (10240) is the practical per-process ceiling on macOS even
+        // when rlim_max reports "unlimited"; asking for more fails the call.
+        let target = rlim_t(OPEN_MAX)
+        let want = min(target, lim.rlim_max == rlimInfinity ? target : lim.rlim_max)
+        if lim.rlim_cur < want {
+            lim.rlim_cur = want
+            _ = setrlimit(RLIMIT_NOFILE, &lim)
         }
     }
 

@@ -32,7 +32,7 @@ enum StreamEofTest {
         // until any large timeout.
         let start = Date()
         let r1 = GitRunner.runStreamingOnce(
-            ["-c", "echo hello-from-git; (sleep 60 &) ; exit 0"],
+            ["-c", "echo hello-from-git; (sleep 3 &) ; exit 0"],
             env: env, timeout: 1800, isAborted: { false }, onProgress: nil,
             exe: "/bin/sh")
         let elapsed1 = Date().timeIntervalSince(start)
@@ -57,7 +57,7 @@ enum StreamEofTest {
         // CASE 3: non-zero exit is reported as failure (and still doesn't hang
         // despite a leaked grandchild).
         let r3 = GitRunner.runStreamingOnce(
-            ["-c", "echo boom; (sleep 60 &) ; exit 7"],
+            ["-c", "echo boom; (sleep 3 &) ; exit 7"],
             env: env, timeout: 1800, isAborted: { false }, onProgress: nil,
             exe: "/bin/sh")
         check("non-zero exit reported as failure", !r3.ok, "ok=\(r3.ok)")
@@ -67,7 +67,7 @@ enum StreamEofTest {
         // produces no output is killed at the deadline, not left forever).
         let start4 = Date()
         let r4 = GitRunner.runStreamingOnce(
-            ["-c", "sleep 60"],
+            ["-c", "sleep 5"],
             env: env, timeout: 1, isAborted: { false }, onProgress: nil,
             exe: "/bin/sh")
         let elapsed4 = Date().timeIntervalSince(start4)
