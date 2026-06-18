@@ -123,6 +123,21 @@ final class InventoryStore: ObservableObject {
         if changed { scheduleSave() }
     }
 
+    // Provider-keyed variant: when a PROVIDER flips into trackedOnly mode,
+    // auto-track everything already cloned for that provider.
+    func autoTrackClonedRepos(providerID: String) {
+        var changed = false
+        for (id, repo) in repos where id.providerID == providerID {
+            if repo.isClonedLocally && !repo.isTracked {
+                var r = repo
+                r.isTracked = true
+                repos[id] = r
+                changed = true
+            }
+        }
+        if changed { scheduleSave() }
+    }
+
     // The tracked repos for a platform, as rels — for the legacy Python path
     // (single provider per kind). Empty set = nothing tracked yet.
     func trackedRels(platform: String) -> [String] {

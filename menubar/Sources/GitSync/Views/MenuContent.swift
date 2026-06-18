@@ -3,10 +3,11 @@ import SwiftUI
 struct MenuContent: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var providers: ProviderStore
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        if !settings.isConfigured {
+        if !providers.isConfigured {
             Text("Not set up yet")
             Button("Set Up GitSync…") {
                 openWindow(id: "onboarding")
@@ -66,7 +67,7 @@ struct MenuContent: View {
         }
         .keyboardShortcut("h", modifiers: [.command, .shift])
 
-        if settings.isConfigured {
+        if providers.isConfigured {
             // Re-runnable setup for the already-configured (the unconfigured
             // case shows a more prominent "Set Up GitSync…" at the top).
             Button("Set Up GitSync…") {

@@ -2,16 +2,15 @@ import SwiftUI
 
 // First-launch setup. A menu-bar (LSUIElement) app can't reliably force-open
 // the macOS `Settings` scene programmatically, so onboarding is its OWN window
-// (opened via openWindow(id: "onboarding")). It reuses the exact same form
-// components as Settings (PathsTab's folder picker + PlatformConfigSections),
-// so the two never drift — onboarding is just a friendlier first pass at the
-// same fields, plus a sync-root step and a finish button.
+// (opened via openWindow(id: "onboarding")). It embeds the exact same
+// ProvidersTab as Settings → Providers, so the two never drift — onboarding is
+// just a welcome header around it plus a finish button.
 //
 // Shown automatically on first launch when nothing is configured (see
 // App.swift). Also reachable any time via the menu's "Set up GitSync…".
 struct OnboardingView: View {
     @EnvironmentObject private var settings: SettingsStore
-    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var providers: ProviderStore
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -23,7 +22,7 @@ struct OnboardingView: View {
                     .foregroundStyle(.tint)
                 Text("Welcome to GitSync")
                     .font(.title2.weight(.semibold))
-                Text("Keep your git repositories cloned and up to date. Set up at least one platform below to get started — you can change any of this later in Settings.")
+                Text("Keep your git repositories cloned and up to date. Add at least one provider (a GitLab/GitHub/Bitbucket source) to get started — you can change any of this later in Settings.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -36,32 +35,23 @@ struct OnboardingView: View {
 
             Divider()
 
-            Form {
-                Section("Where to sync") {
-                    FolderField(value: $settings.syncRoot,
-                                prompt: "/Users/you/git/synced")
-                    Text("Repositories are cloned under this folder, organized by platform (e.g. \(displayRoot)/Gitlab/…).")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                // Same credential sections as Settings → Platforms (the
-                // advanced whitelist toggle is hidden here to keep it simple).
-                PlatformConfigSections(showFilterMode: false)
-            }
-            .formStyle(.grouped)
+            // The same provider list/editor as Settings → Providers, so the two
+            // never drift. Add a provider here and it's configured for real.
+            ProvidersTab()
+                .environmentObject(providers)
+                .environmentObject(settings)
 
             Divider()
 
             HStack {
-                if !settings.isConfigured {
-                    Label("Configure at least one platform to enable syncing",
+                if !providers.isConfigured {
+                    Label("Add a provider to enable syncing",
                           systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                // When nothing's configured, the primary action is a soft
-                // "Skip for now"; once something's set up it becomes "Done".
-                if settings.isConfigured {
+                if providers.isConfigured {
                     Button("Done") { finish() }
                         .keyboardShortcut(.defaultAction)
                         .buttonStyle(.borderedProminent)
@@ -72,13 +62,8 @@ struct OnboardingView: View {
             }
             .padding(12)
         }
-        .frame(width: 560, height: 640)
+        .frame(width: 580, height: 640)
         .onAppear { bringOnboardingToFront() }
-    }
-
-    private var displayRoot: String {
-        let r = settings.syncRoot.trimmingCharacters(in: .whitespaces)
-        return r.isEmpty ? "~/git" : r
     }
 
     private func finish() {

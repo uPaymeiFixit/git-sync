@@ -126,6 +126,7 @@ struct GitSyncApp: App {
                 .environmentObject(settings)
                 .environmentObject(history)
                 .environmentObject(inventory)
+                .environmentObject(providers)
                 .onAppear {
                     _ = state.scheduler   // ensure scheduler is built
                     installTerminationGuard()
@@ -140,6 +141,7 @@ struct GitSyncApp: App {
                 .environmentObject(settings)
                 .environmentObject(state)
                 .environmentObject(inventory)
+                .environmentObject(providers)
                 .onChange(of: settings.scheduleMode) { _, _ in state.rescheduleIfNeeded() }
                 .onChange(of: settings.scheduleHours) { _, _ in state.rescheduleIfNeeded() }
                 .onChange(of: settings.scheduleDailyHour) { _, _ in state.rescheduleIfNeeded() }
@@ -150,6 +152,7 @@ struct GitSyncApp: App {
             OnboardingView()
                 .environmentObject(settings)
                 .environmentObject(state)
+                .environmentObject(providers)
         }
         .windowResizability(.contentSize)
 
@@ -158,6 +161,7 @@ struct GitSyncApp: App {
                 .environmentObject(state)
                 .environmentObject(settings)
                 .environmentObject(inventory)
+                .environmentObject(providers)
         }
         .windowResizability(.contentSize)
 
@@ -203,7 +207,8 @@ struct GitSyncApp: App {
                     // launch (the MENU content's .onAppear only fires when the
                     // menu is opened), so this is where we catch a fresh,
                     // unconfigured install and pop the setup window once.
-                    if settings.shouldShowOnboarding {
+                    // "Configured" now means "has a provider" (post-migration).
+                    if !settings.hasCompletedSetup && !state.providers.isConfigured {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             openWindow(id: "onboarding")
                             NSApp.activate(ignoringOtherApps: true)

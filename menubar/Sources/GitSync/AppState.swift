@@ -226,27 +226,33 @@ final class AppState: ObservableObject {
 
     // ---- Whitelist / Track mode --------------------------------------
 
-    var trackedOnlyPlatforms: Set<String> {
-        Set(Platform.allCases.map(\.rawValue).filter { settingsStore.filterMode(platform: $0) == .trackedOnly })
-    }
-
-    func isTrackedOnly(platform: String) -> Bool {
-        settingsStore.filterMode(platform: platform) == .trackedOnly
+    // Is the repo's PROVIDER in whitelist (trackedOnly) mode? Keyed by the
+    // repo's providerID. Falls back to the legacy platform-keyed setting for
+    // un-migrated rows (providerID "").
+    func isTrackedOnly(repoID id: RepoID) -> Bool {
+        if let p = providers.provider(id: UUID(uuidString: id.providerID) ?? UUID()) {
+            return p.filterMode == .trackedOnly
+        }
+        return settingsStore.filterMode(platform: id.platform) == .trackedOnly
     }
 
     func setTracked(_ ids: Set<RepoID>, _ tracked: Bool) {
         inventory.setTracked(ids, tracked)
     }
 
-    // Flip a platform's filter mode. When turning ON whitelist mode, auto-track
-    // everything already cloned on disk for that platform so nothing the user
-    // already has silently stops updating.
-    func setFilterMode(_ mode: FilterMode, platform: String) {
-        let was = settingsStore.filterMode(platform: platform)
-        settingsStore.setFilterMode(mode, platform: platform)
-        if mode == .trackedOnly && was != .trackedOnly {
-            inventory.autoTrackClonedRepos(platform: platform)
+    // Save a provider (validate → upsert → token), and if it just flipped into
+    // whitelist mode, auto-track everything already cloned for it so nothing
+    // the user has stops updating. Returns the validation result.
+    @discardableResult
+    func saveProvider(_ provider: Provider, token: String) -> ProviderStore.ProviderValidation {
+        let wasTrackedOnly = providers.provider(id: provider.id)?.filterMode == .trackedOnly
+        let v = providers.upsert(provider)
+        guard v.isValid else { return v }
+        providers.setToken(token, for: provider)
+        if provider.filterMode == .trackedOnly && !wasTrackedOnly {
+            inventory.autoTrackClonedRepos(providerID: provider.id.uuidString)
         }
+        return v
     }
 
     // Per-repo sync triggered from the Repositories view's "Sync this repo"

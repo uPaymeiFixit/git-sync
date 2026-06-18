@@ -6,7 +6,7 @@ struct SettingsWindow: View {
     var body: some View {
         TabView {
             PathsTab().tabItem { Label("Paths", systemImage: "folder") }
-            PlatformsTab().tabItem { Label("Platforms", systemImage: "rectangle.connected.to.line.below") }
+            ProvidersTab().tabItem { Label("Providers", systemImage: "rectangle.connected.to.line.below") }
             BehaviorTab().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
             ScheduleTab().tabItem { Label("Schedule", systemImage: "clock") }
         }
@@ -33,80 +33,6 @@ private struct PathsTab: View {
             }
         }
         .formStyle(.grouped)
-    }
-}
-
-private struct PlatformsTab: View {
-    var body: some View {
-        Form {
-            PlatformConfigSections(showFilterMode: true)
-        }
-        .formStyle(.grouped)
-    }
-}
-
-// The GitLab / GitHub / Bitbucket credential sections, shared by Settings →
-// Platforms and the first-launch onboarding window so the two never drift.
-// `showFilterMode` hides the advanced whitelist toggle during onboarding to
-// keep first-launch simple.
-struct PlatformConfigSections: View {
-    @EnvironmentObject private var settings: SettingsStore
-    var showFilterMode: Bool = true
-
-    var body: some View {
-        Section("GitLab") {
-            EnabledCheckbox(skipBinding: $settings.skipGitlab,
-                            label: "Enable GitLab sync")
-            LabeledField(label: "Host",
-                         value: $settings.gitlabHost,
-                         prompt: "gitlab.example.com")
-            LabeledSecureField(label: "Personal access token",
-                               value: $settings.gitlabToken,
-                               prompt: "glpat-…",
-                               generateURL: gitlabTokenURL())
-            if showFilterMode { FilterModeRow(platform: "gitlab") }
-            Text("Token stored in Keychain. Needs `read_api` and `read_repository` scopes. Required — GitLab discovery uses the API directly.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-
-        Section("GitHub") {
-            EnabledCheckbox(skipBinding: $settings.skipGithub,
-                            label: "Enable GitHub sync")
-            LabeledField(label: "Organization",
-                         value: $settings.githubOrg,
-                         prompt: "your-github-org")
-            LabeledSecureField(label: "Personal access token",
-                               value: $settings.githubToken,
-                               prompt: "ghp_…",
-                               generateURL: URL(string: "https://github.com/settings/tokens/new?scopes=repo&description=GitSync"))
-            if showFilterMode { FilterModeRow(platform: "github") }
-            Text("Token stored in Keychain. Classic PAT needs `repo` scope; fine-grained needs Contents+Metadata read on the org.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-
-        Section("Bitbucket") {
-            EnabledCheckbox(skipBinding: $settings.skipBitbucket,
-                            label: "Enable Bitbucket sync")
-            LabeledField(label: "Workspace",
-                         value: $settings.bitbucketWorkspace,
-                         prompt: "your-workspace-slug")
-            LabeledField(label: "Username",
-                         value: $settings.bitbucketUser,
-                         prompt: "your-bitbucket-username")
-            LabeledSecureField(label: "App password",
-                               value: $settings.bitbucketAppPassword,
-                               prompt: "",
-                               generateURL: URL(string: "https://bitbucket.org/account/settings/app-passwords/new"))
-            if showFilterMode { FilterModeRow(platform: "bitbucket") }
-            Text("App password stored in Keychain. Needs read:repository:bitbucket scope.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private func gitlabTokenURL() -> URL? {
-        let host = settings.gitlabHost.trimmingCharacters(in: .whitespaces)
-        guard !host.isEmpty else { return nil }
-        return URL(string: "https://\(host)/-/user_settings/personal_access_tokens?name=GitSync&scopes=read_api,read_repository")
     }
 }
 
@@ -235,31 +161,6 @@ struct EnabledCheckbox: View {
 // Per-platform sync scope: sync everything (default) vs. only repos the user
 // has tracked (whitelist). Routed through AppState.setFilterMode so flipping
 // to whitelist auto-tracks what's already on disk.
-struct FilterModeRow: View {
-    @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var settings: SettingsStore
-    let platform: String
-
-    var body: some View {
-        Picker("Sync scope", selection: Binding(
-            get: { settings.filterMode(platform: platform) },
-            set: { state.setFilterMode($0, platform: platform) }
-        )) {
-            ForEach(FilterMode.allCases, id: \.self) { mode in
-                Text(mode.displayName).tag(mode)
-            }
-        }
-        if settings.filterMode(platform: platform) == .trackedOnly {
-            Text("Discovers all repos so you can browse them, but only syncs ones you Track (★) in the Repositories window. Repos already on disk were tracked automatically.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-}
-
-// Generic labeled text field. Label is OUTSIDE the box; the actual value
-// shows INSIDE the box. Empty values show the prompt as placeholder text.
-// roundedBorder gives a visible outline so the field doesn't disappear
-// into the form background.
 struct LabeledField: View {
     let label: String
     @Binding var value: String

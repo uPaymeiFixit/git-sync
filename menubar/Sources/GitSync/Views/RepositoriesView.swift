@@ -11,6 +11,7 @@ struct RepositoriesView: View {
     @EnvironmentObject private var inventory: InventoryStore
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var providers: ProviderStore
     @Environment(\.openWindow) private var openWindow
 
     @State private var searchText: String = ""
@@ -37,7 +38,7 @@ struct RepositoriesView: View {
             toolbar(visibleCount: visibleCount, chipCounts: chipCounts)
             Divider()
             if visibleCount == 0 {
-                if inventory.repos.isEmpty && !settings.isConfigured {
+                if inventory.repos.isEmpty && !providers.isConfigured {
                     // Fresh, unconfigured install: point at setup, not "run a
                     // sync" (which would do nothing with no platform configured).
                     ContentUnavailableView {
@@ -208,7 +209,7 @@ struct RepositoriesView: View {
         if ids.count == 1, let id = ids.first, let repo = inventory.repos[id] {
             Button("Sync this repo") { state.syncRepo(id) }
                 .disabled(state.isRunning || state.isSyncing(id))
-            if state.isTrackedOnly(platform: id.platform) {
+            if state.isTrackedOnly(repoID: id) {
                 if repo.isTracked {
                     Button("Untrack this repo") { state.setTracked([id], false) }
                 } else {
@@ -237,7 +238,7 @@ struct RepositoriesView: View {
             let onDisk = ids.filter { inventory.repos[$0]?.isClonedLocally == true }
             // Bulk track/untrack for selections whose platforms are in
             // whitelist mode (a mixed selection just acts on the eligible ones).
-            let trackable = ids.filter { state.isTrackedOnly(platform: $0.platform) }
+            let trackable = ids.filter { state.isTrackedOnly(repoID: $0) }
             if !trackable.isEmpty {
                 Button("Track \(trackable.count) repo(s)") { state.setTracked(trackable, true) }
                 Button("Untrack \(trackable.count) repo(s)") { state.setTracked(trackable, false) }
@@ -367,7 +368,7 @@ private struct RepoRow: View {
             HStack(spacing: 12) {
                 // Track toggle — only meaningful (and shown) when this repo's
                 // platform is in whitelist mode. Star = tracked.
-                if state.isTrackedOnly(platform: repo.id.platform) {
+                if state.isTrackedOnly(repoID: repo.id) {
                     Button {
                         state.setTracked([repo.id], !repo.isTracked)
                     } label: {
