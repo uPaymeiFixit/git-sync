@@ -161,6 +161,64 @@ actor SyncEngine {
         }
     }
 
+    // One provider's per-run context. Everything downstream (discovery,
+    // filtering, fan-out, stale-scan) keys off this so the run loop is
+    // provider-uniform — no special-casing per platform.
+    private struct RunUnit {
+        let providerID: String          // "" for the synthesized legacy units
+        let kind: Platform
+        let title: String
+        let client: PlatformDiscovery
+        let destRoot: URL               // where this provider's repos clone
+        let filterMode: FilterMode
+        let trackedSet: Set<String>     // provider-local rels, when trackedOnly
+    }
+
+    // Build the run units. Native path: one per enabled ResolvedProvider.
+    // Legacy path (no providers in the snapshot — Python fallback or pre-
+    // population): synthesize from the env-driven enabledPlatforms() so behavior
+    // is unchanged.
+    private func runUnits(only: Set<Platform>?) -> [RunUnit] {
+        if !providersSnapshot.isEmpty {
+            return providersSnapshot.compactMap { rp -> RunUnit? in
+                let p = rp.provider
+                let kind = Platform(rawValue: p.kind.rawValue) ?? .gitlab
+                if let only, !only.contains(kind) { return nil }
+                let root = URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)
+                let client: PlatformDiscovery
+                switch p.kind {
+                case .gitlab:
+                    client = GitLabClient(host: p.host, token: rp.token,
+                                          includeArchived: p.includeArchived,
+                                          syncRoot: syncRoot, localRoot: root)
+                case .github:
+                    client = GitHubClient(org: p.scope, token: rp.token,
+                                          includeArchived: p.includeArchived,
+                                          syncRoot: syncRoot, localRoot: root)
+                case .bitbucket:
+                    client = BitbucketClient(workspace: p.scope, user: p.bitbucketUser,
+                                             appPassword: rp.token,
+                                             syncRoot: syncRoot, localRoot: root)
+                }
+                return RunUnit(providerID: p.id.uuidString, kind: kind, title: p.name,
+                               client: client, destRoot: root, filterMode: p.filterMode,
+                               trackedSet: Set(rp.trackedRels))
+            }
+        }
+        // Legacy fallback.
+        var platforms = enabledPlatforms()
+        if let only { platforms = platforms.filter { only.contains($0) } }
+        return platforms.map { kind in
+            RunUnit(providerID: "", kind: kind, title: kind.titleName,
+                    client: makeClient(kind),
+                    destRoot: syncRoot.appendingPathComponent(platformDir(kind)),
+                    filterMode: filterMode(kind),
+                    trackedSet: filterMode(kind) == .trackedOnly ? trackedSet(kind) : [])
+        }
+    }
+
+    private var providersSnapshot: [ResolvedProvider] { settings.providers }
+
     // Immutable, Sendable snapshot of the actor config the per-repo git work
     // needs. Captured ONCE on the actor before fan-out, then handed to the
     // nonisolated worker so each repo's clone/fetch runs OFF the actor — that
@@ -207,34 +265,37 @@ actor SyncEngine {
 
     // Runs one repo's clone_or_update OFF the actor (nonisolated static).
     // This is the unit the TaskGroup parallelizes.
+    // `destRoot` is the folder the repo clones into (the provider's localPath,
+    // or syncRoot/<Dir> on the legacy path); `rel` is provider-local. The
+    // emitted outcome carries `providerID` so the inventory keys it correctly.
     nonisolated static func syncOne(
-        cfg: WorkConfig, mux: SSHMultiplexer, platform: String, rel: String,
-        sshURL: String, branch: String, abort: AbortBox, sink: EngineSink,
-        pool: GitWorkPool
+        cfg: WorkConfig, mux: SSHMultiplexer, providerID: String, platform: String,
+        rel: String, destRoot: URL, sshURL: String, branch: String,
+        abort: AbortBox, sink: EngineSink, pool: GitWorkPool
     ) async -> Outcome {
-        let dest = cfg.syncRoot.appendingPathComponent(rel)
+        let dest = destRoot.appendingPathComponent(rel)
         await sink.emit(.workerStart(platform: platform, rel: rel,
             op: FileManager.default.fileExists(atPath: dest.appendingPathComponent(".git").path) ? "fetch" : "clone"))
         let ctx = gitContext(cfg, mux: mux, rel: rel, abort: abort, sink: sink, platform: platform)
         // RepoSyncer.cloneOrUpdate BLOCKS on subprocess I/O — run it on the
         // OS-thread work pool (not the cooperative pool), so N of them can sit
         // blocked on network/disk at once. The pool's semaphore bounds width.
-        let outcome = await pool.run {
+        var outcome = await pool.run {
             RepoSyncer.cloneOrUpdate(platform: platform, rel: rel, sshURL: sshURL,
                                      dest: dest, branch: branch, ctx: ctx)
         }
+        // Stamp providerID onto the outcome (RepoSyncer is provider-agnostic).
+        outcome = outcome.withProviderID(providerID)
         await sink.emit(.workerFinish(platform: platform, rel: rel))
         await sink.emit(.outcome(platform: platform, outcome: outcome))
         return outcome
     }
 
     private func runFull(listOnly: Bool = false, only: Set<Platform>? = nil) async {
-        var platforms = enabledPlatforms()
-        if let only { platforms = platforms.filter { only.contains($0) } }
-        // No platforms to run (e.g. an empty `only` filter, or nothing enabled):
-        // finish cleanly and tear down the run state rather than dangling with
-        // fullRunActive=true. allFinished() lets AppState finalize the empty run.
-        if platforms.isEmpty {
+        let units = runUnits(only: only)
+        // Nothing to run (empty filter / nothing configured): finish cleanly
+        // rather than dangling with fullRunActive=true.
+        if units.isEmpty {
             await sink.allFinished()
             clearFullRun()
             return
@@ -244,70 +305,64 @@ actor SyncEngine {
                                  uid: getuid(),
                                  enabled: env["GIT_SYNC_NO_SSH_MUX"] != "1")
 
-        // Discover all platforms, emit remote_project events, collect jobs.
-        // `skipped`  = blacklist (GIT_SYNC_SKIP) → emits a .skipped outcome.
-        // `excluded` = whitelist exclusion (trackedOnly mode, repo not tracked)
-        //              → silently omitted, no outcome (keeps its prior status).
-        var jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool, excluded: Bool)] = []
-        var perPlatformComplete: [Platform: Bool] = [:]
-        for platform in platforms {
+        // A job carries its provider context so fan-out can clone into the right
+        // folder and stamp the right providerID.
+        struct Job {
+            let unit: RunUnit
+            let repo: DiscoveredRepo
+            let skipped: Bool    // blacklist (GIT_SYNC_SKIP) → emits .skipped
+            let excluded: Bool   // whitelist miss → silently omitted, no outcome
+        }
+        var jobs: [Job] = []
+        // Keyed by providerID (or "platform#" for legacy units, which have "").
+        var complete: [String: Bool] = [:]
+        func key(_ u: RunUnit) -> String { u.providerID.isEmpty ? "p:" + u.kind.rawValue : u.providerID }
+
+        for unit in units {
             if aborted { break }
-            let client = makeClient(platform)
-            // Fast reachability probe before the expensive discovery. If the
-            // host doesn't answer within a few seconds (e.g. GitLab while the
-            // VPN is down), fail this platform NOW instead of grinding through
-            // discovery's 5 × 60s connect timeouts. Per-platform: a down GitLab
-            // doesn't touch GitHub / Bitbucket. The scheduler's per-platform
-            // catch-up then keeps only the unreachable platform "due", so its
-            // 30-min retry is just this ~8s probe — not a full re-sync.
-            if let probe = client.probeURL {
-                await sink.emit(.phase(label: "Checking \(platform.titleName)…"))
+            // Fast reachability probe before the expensive discovery (VPN-down
+            // fails in ~8s, not ~5min). Isolated per provider.
+            if let probe = unit.client.probeURL {
+                await sink.emit(.phase(label: "Checking \(unit.title)…"))
                 if !hostReachable(probe) {
-                    perPlatformComplete[platform] = false
-                    await sink.logLine("\(platform.titleName) unreachable (host did not respond — VPN down?)",
-                                       platform: platform.rawValue)
-                    await sink.platformFinished(platform.rawValue, exitCode: 1)
+                    complete[key(unit)] = false
+                    await sink.logLine("\(unit.title) unreachable (host did not respond — VPN down?)",
+                                       platform: unit.kind.rawValue)
+                    await sink.platformFinished(unit.kind.rawValue, exitCode: 1)
                     continue
                 }
             }
-            await sink.emit(.phase(label: "Discovering \(platform.titleName)…"))
-            let result = client.discoverAll(skip: skip)
-            perPlatformComplete[platform] = (result.fatalError == nil)
+            await sink.emit(.phase(label: "Discovering \(unit.title)…"))
+            let result = unit.client.discoverAll(skip: skip)
+            complete[key(unit)] = (result.fatalError == nil)
             if let fatal = result.fatalError {
-                await sink.logLine("discovery failed: \(fatal)", platform: platform.rawValue)
-                await sink.platformFinished(platform.rawValue, exitCode: 1)
+                await sink.logLine("discovery failed: \(fatal)", platform: unit.kind.rawValue)
+                await sink.platformFinished(unit.kind.rawValue, exitCode: 1)
                 continue
             }
-            let mode = filterMode(platform)
-            let tracked = mode == .trackedOnly ? trackedSet(platform) : []
             for repo in result.repos {
-                await sink.emit(.remoteProject(platform: platform.rawValue, rel: repo.rel,
-                                               sshURL: repo.sshURL, defaultBranch: repo.defaultBranch))
+                await sink.emit(.remoteProject(providerID: unit.providerID, platform: unit.kind.rawValue,
+                                               rel: repo.rel, sshURL: repo.sshURL,
+                                               defaultBranch: repo.defaultBranch))
                 let isSkipped = skip.matches(repo.namespacePath)
-                // In trackedOnly mode, a repo that isn't blacklisted but also
-                // isn't in the tracked whitelist is EXCLUDED (silently omitted).
-                let isExcluded = mode == .trackedOnly && !isSkipped && !tracked.contains(repo.rel)
-                jobs.append((platform, repo, isSkipped, isExcluded))
+                let isExcluded = unit.filterMode == .trackedOnly && !isSkipped && !unit.trackedSet.contains(repo.rel)
+                jobs.append(Job(unit: unit, repo: repo, skipped: isSkipped, excluded: isExcluded))
             }
         }
 
-        // list-only: discovery is done and remote_project events emitted —
-        // stop here without touching any repo.
+        // list-only: discovery done, remote_project events emitted — stop.
         if listOnly {
-            for platform in platforms where perPlatformComplete[platform] == true {
-                await sink.platformFinished(platform.rawValue, exitCode: 2)  // EXIT_SKIPPED
+            for unit in units where complete[key(unit)] == true {
+                await sink.platformFinished(unit.kind.rawValue, exitCode: 2)  // EXIT_SKIPPED
             }
             await sink.allFinished()
             clearFullRun()
             return
         }
 
-        // Repos we'll actually sync: neither blacklist-skipped nor
-        // whitelist-excluded.
         let toSync = jobs.filter { !$0.skipped && !$0.excluded }
 
-        // Prewarm SSH masters before fan-out (the 20x speedup) — only for the
-        // hosts we'll actually contact.
+        // Prewarm SSH masters for the hosts we'll actually contact.
         let hosts = SSHMultiplexer.uniqueHosts(toSync.map { $0.repo.sshURL })
         if !hosts.isEmpty {
             await sink.emit(.phase(label: "Warming \(hosts.count) SSH connection\(hosts.count == 1 ? "" : "s")…"))
@@ -315,65 +370,76 @@ actor SyncEngine {
         let warmed = mux.prewarm(hosts: hosts)
         defer { mux.cleanup(pairs: warmed) }
 
-        // Emit .skipped outcomes for blacklist matches only. Whitelist
-        // EXCLUDED repos get no outcome — they keep whatever status they had
-        // (e.g. notClonedYet), so the inventory shows "available but untracked"
-        // rather than a misleading "skipped".
+        // .skipped outcomes for blacklist matches only (whitelist-excluded get
+        // no outcome — they keep their prior inventory status).
         for job in jobs where job.skipped {
-            await sink.emit(.outcome(platform: job.platform.rawValue,
-                                     outcome: Outcome(platform: job.platform.rawValue, rel: job.repo.rel,
-                                                      status: .skipped, url: job.repo.sshURL)))
+            await sink.emit(.outcome(platform: job.unit.kind.rawValue,
+                                     outcome: Outcome(platform: job.unit.kind.rawValue, rel: job.repo.rel,
+                                                      status: .skipped, url: job.repo.sshURL,
+                                                      providerID: job.unit.providerID)))
         }
 
-        // Fan out across all repos with a bounded concurrency cap.
+        // Fan out. Each job clones into its provider's destRoot.
         await sink.emit(.phase(label: "Syncing \(toSync.count) repo\(toSync.count == 1 ? "" : "s")…"))
-        await fanOut(toSync, mux: mux)
+        await fanOut(toSync.map {
+            FanJob(providerID: $0.unit.providerID, kind: $0.unit.kind, rel: $0.repo.rel,
+                   destRoot: $0.unit.destRoot, sshURL: $0.repo.sshURL, branch: $0.repo.defaultBranch)
+        }, mux: mux)
         await sink.emit(.phase(label: "Scanning for stale local checkouts…"))
 
-        // Tracked-but-gone (whitelist mode only): a repo the user tracks that
-        // discovery no longer returned. Emit a distinct advisory and add its
-        // dest to `expected` below so the stale-scan doesn't also flag it as
-        // merely "untracked". Never deleted; the local copy stays put.
-        var trackedGoneDests: [Platform: Set<String>] = [:]
-        for platform in platforms where perPlatformComplete[platform] == true && filterMode(platform) == .trackedOnly {
-            let discovered = Set(jobs.filter { $0.platform == platform }.map { $0.repo.rel })
-            for rel in trackedSet(platform) where !discovered.contains(rel) {
-                let dest = syncRoot.appendingPathComponent(rel)
-                // Only report it if it's actually on disk (a tracked repo never
-                // cloned that's also gone from remote is just noise).
+        // Tracked-but-gone (whitelist mode): a tracked repo discovery no longer
+        // returned. Advisory only; never deleted. Keyed per provider.
+        var trackedGoneDests: [String: Set<String>] = [:]
+        for unit in units where complete[key(unit)] == true && unit.filterMode == .trackedOnly {
+            let discovered = Set(jobs.filter { key($0.unit) == key(unit) }.map { $0.repo.rel })
+            for rel in unit.trackedSet where !discovered.contains(rel) {
+                let dest = unit.destRoot.appendingPathComponent(rel)
                 guard FileManager.default.fileExists(atPath: dest.appendingPathComponent(".git").path) else { continue }
-                trackedGoneDests[platform, default: []].insert(dest.standardizedFileURL.path)
-                await sink.emit(.outcome(platform: platform.rawValue,
-                    outcome: Outcome(platform: platform.rawValue, rel: rel, status: .trackedGone)))
+                trackedGoneDests[key(unit), default: []].insert(dest.standardizedFileURL.path)
+                await sink.emit(.outcome(platform: unit.kind.rawValue,
+                    outcome: Outcome(platform: unit.kind.rawValue, rel: rel, status: .trackedGone,
+                                     providerID: unit.providerID)))
             }
         }
 
-        // Stale-on-disk / non-git-dir scan per platform, only when that
-        // platform's discovery was complete (mirrors finish_run gating).
-        for platform in platforms {
-            guard perPlatformComplete[platform] == true else { continue }
-            let platformRoot = syncRoot.appendingPathComponent(platformDir(platform))
-            var expected = Set(jobs.filter { $0.platform == platform }
-                .map { syncRoot.appendingPathComponent($0.repo.rel).standardizedFileURL.path })
-            // Tracked-but-gone repos were already reported above; keep the
-            // stale-scan from double-reporting them.
-            expected.formUnion(trackedGoneDests[platform] ?? [])
-            // In whitelist mode, an on-disk repo that isn't expected is just
-            // "untracked", not "stale-on-disk" (which implies the remote
-            // dropped it). Label it neutrally so it isn't an anomaly.
-            let staleStatus: SyncStatus = filterMode(platform) == .trackedOnly ? .untracked : .staleOnDisk
+        // Stale-on-disk / non-git scan per provider folder (only when complete).
+        for unit in units where complete[key(unit)] == true {
+            var expected = Set(jobs.filter { key($0.unit) == key(unit) }
+                .map { unit.destRoot.appendingPathComponent($0.repo.rel).standardizedFileURL.path })
+            expected.formUnion(trackedGoneDests[key(unit)] ?? [])
+            let staleStatus: SyncStatus = unit.filterMode == .trackedOnly ? .untracked : .staleOnDisk
+            let pid = unit.providerID
+            let kindRaw = unit.kind.rawValue
+            let root = unit.destRoot
             let extras = StaleScan.discoverExtras(
-                platformRoot: platformRoot, platform: platform.rawValue,
-                expected: expected, rel: { self.rel($0) }, staleStatus: staleStatus)
-            for o in extras { await sink.emit(.outcome(platform: platform.rawValue, outcome: o)) }
+                platformRoot: root, platform: kindRaw,
+                expected: expected,
+                rel: { dest in
+                    let r = root.standardizedFileURL.path
+                    let d = dest.standardizedFileURL.path
+                    return d.hasPrefix(r + "/") ? String(d.dropFirst(r.count + 1)) : d
+                },
+                staleStatus: staleStatus)
+            for o in extras {
+                await sink.emit(.outcome(platform: kindRaw, outcome: o.withProviderID(pid)))
+            }
         }
 
-        // Per-platform finish (exit 0 for those that completed).
-        for platform in platforms where perPlatformComplete[platform] == true {
-            await sink.platformFinished(platform.rawValue, exitCode: 0)
+        for unit in units where complete[key(unit)] == true {
+            await sink.platformFinished(unit.kind.rawValue, exitCode: 0)
         }
         await sink.allFinished()
         clearFullRun()
+    }
+
+    // The Sendable per-repo work item handed to fanOut.
+    struct FanJob: Sendable {
+        let providerID: String
+        let kind: Platform
+        let rel: String
+        let destRoot: URL
+        let sshURL: String
+        let branch: String
     }
 
     private func runIndividual(id: RepoID, knownSSH: String?, knownBranch: String?) async {
@@ -382,6 +448,14 @@ actor SyncEngine {
             await sink.individualFinished(id, exitCode: -1)
             return
         }
+        // Resolve the provider this repo belongs to (its client + dest folder).
+        // Falls back to the legacy syncRoot/<Dir> when there's no provider match
+        // (e.g. providerID "" on the Python path).
+        let unit = runUnits(only: nil).first { $0.providerID == id.providerID }
+            ?? runUnits(only: [platform]).first
+        let destRoot = unit?.destRoot ?? syncRoot.appendingPathComponent(platformDir(platform))
+        let client = unit?.client ?? makeClient(platform)
+
         let mux = SSHMultiplexer(parallel: 1,
                                  pid: ProcessInfo.processInfo.processIdentifier,
                                  uid: getuid(),
@@ -392,7 +466,6 @@ actor SyncEngine {
         var sshURL = knownSSH ?? ""
         var branch = knownBranch ?? ""
         if sshURL.isEmpty || branch.isEmpty {
-            let client = makeClient(platform)
             guard let repo = client.discoverOne(rel: id.rel) else {
                 await sink.logLine("--only \(id.rel): not found in remote listing", platform: id.platform)
                 await sink.individualFinished(id, exitCode: 1)
@@ -400,7 +473,7 @@ actor SyncEngine {
             }
             sshURL = repo.sshURL
             branch = repo.defaultBranch
-            await sink.emit(.remoteProject(platform: id.platform, rel: repo.rel,
+            await sink.emit(.remoteProject(providerID: id.providerID, platform: id.platform, rel: repo.rel,
                                            sshURL: repo.sshURL, defaultBranch: repo.defaultBranch))
             // honor skip even on an individual sync
             if skip.matches(repo.namespacePath) {
@@ -413,17 +486,16 @@ actor SyncEngine {
         defer { mux.cleanup(pairs: warmed) }
 
         _ = await SyncEngine.syncOne(
-            cfg: workConfig(), mux: mux, platform: id.platform, rel: id.rel,
-            sshURL: sshURL, branch: branch, abort: abortBox, sink: sink,
-            pool: GitWorkPool(width: 1))
+            cfg: workConfig(), mux: mux, providerID: id.providerID, platform: id.platform,
+            rel: id.rel, destRoot: destRoot, sshURL: sshURL, branch: branch,
+            abort: abortBox, sink: sink, pool: GitWorkPool(width: 1))
         await sink.individualFinished(id, exitCode: 0)
     }
 
     // Bounded fan-out: at most `parallel` repos syncing at once, each running
     // OFF the actor via the nonisolated syncOne. The TaskGroup tasks no longer
     // hop back onto the actor for the git work, so they genuinely overlap.
-    private func fanOut(_ jobs: [(platform: Platform, repo: DiscoveredRepo, skipped: Bool, excluded: Bool)],
-                        mux: SSHMultiplexer) async {
+    private func fanOut(_ jobs: [FanJob], mux: SSHMultiplexer) async {
         let cap = max(1, parallel)
         let cfg = workConfig()
         let sink = self.sink
@@ -438,8 +510,9 @@ actor SyncEngine {
                 running += 1
                 group.addTask {
                     _ = await SyncEngine.syncOne(
-                        cfg: cfg, mux: mux, platform: job.platform.rawValue, rel: job.repo.rel,
-                        sshURL: job.repo.sshURL, branch: job.repo.defaultBranch,
+                        cfg: cfg, mux: mux, providerID: job.providerID, platform: job.kind.rawValue,
+                        rel: job.rel, destRoot: job.destRoot,
+                        sshURL: job.sshURL, branch: job.branch,
                         abort: abort, sink: sink, pool: pool)
                 }
             }

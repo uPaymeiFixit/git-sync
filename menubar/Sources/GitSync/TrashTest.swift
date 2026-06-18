@@ -46,7 +46,12 @@ enum TrashTest {
             RepoID(platform: "gitlab", rel: "Gitlab/non-git-dir"),
             RepoID(platform: "gitlab", rel: "Gitlab/not-on-disk"),
         ]
-        let report = await RepoTrasher.trash(ids: ids, under: root)
+        // Fixtures live at root/<rel>; resolve straight off root and allow that
+        // root (mirrors the legacy-fallback path in AppState.diskPathResolver).
+        let report = await RepoTrasher.trash(
+            ids: ids,
+            resolve: { root.appendingPathComponent($0.rel) },
+            allowedRoots: [root])
 
         var failures = 0
         func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {

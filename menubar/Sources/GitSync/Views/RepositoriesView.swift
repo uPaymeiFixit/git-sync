@@ -215,7 +215,7 @@ struct RepositoriesView: View {
                     Button("Track this repo") { state.setTracked([id], true) }
                 }
             }
-            Button("Reveal in Finder") { RepoActions.reveal(repo: repo, settings: settings) }
+            Button("Reveal in Finder") { RepoActions.reveal(target: state.diskPath(for: repo.id)) }
             if !repo.sshURL.isEmpty {
                 Button("Copy SSH URL") {
                     let pb = NSPasteboard.general
@@ -406,7 +406,7 @@ private struct RepoRow: View {
                 .disabled(isInSkipList)
 
                 Button {
-                    RepoActions.reveal(repo: repo, settings: settings)
+                    RepoActions.reveal(target: state.diskPath(for: repo.id))
                 } label: {
                     Image(systemName: "folder")
                 }
@@ -452,19 +452,18 @@ private struct RepoRow: View {
 // multi-selection context menu.
 @MainActor
 enum RepoActions {
-    static func reveal(repo: Repo, settings: SettingsStore) {
-        // rel is canonical (includes the platform directory, e.g.
-        // "Gitlab/foo/bar"), so the on-disk path is just syncRoot + rel.
-        let root = URL(fileURLWithPath:
-            (settings.syncRoot as NSString).expandingTildeInPath)
-        let target = root.appendingPathComponent(repo.id.rel)
+    // `target` is the repo's resolved on-disk path (AppState.diskPath(for:),
+    // which knows each provider's folder). Reveal it, or fall back to its
+    // parent so the user lands somewhere sensible if it isn't cloned yet.
+    static func reveal(target: URL?) {
+        guard let target else { return }
         if FileManager.default.fileExists(atPath: target.path) {
             NSWorkspace.shared.activateFileViewerSelecting([target])
-        } else if let platformDir = repo.id.rel.split(separator: "/").first {
-            // Repo isn't on disk; fall back to opening the platform root
-            // so the user can see what is there.
-            NSWorkspace.shared.open(
-                root.appendingPathComponent(String(platformDir), isDirectory: true))
+        } else {
+            let parent = target.deletingLastPathComponent()
+            if FileManager.default.fileExists(atPath: parent.path) {
+                NSWorkspace.shared.open(parent)
+            }
         }
     }
 

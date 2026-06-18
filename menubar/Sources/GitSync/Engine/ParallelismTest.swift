@@ -90,8 +90,9 @@ enum ParallelismTest {
                     let bare = base.appendingPathComponent("r\(i).git").path
                     g.addTask {
                         _ = await SyncEngine.syncOne(
-                            cfg: cfg, mux: mux, platform: "gitlab", rel: "Gitlab/r\(i)",
-                            sshURL: bare, branch: "master", abort: abort, sink: rec, pool: pool)
+                            cfg: cfg, mux: mux, providerID: "", platform: "gitlab", rel: "r\(i)",
+                            destRoot: gitlab, sshURL: bare, branch: "master",
+                            abort: abort, sink: rec, pool: pool)
                     }
                 }
                 await g.waitForAll()

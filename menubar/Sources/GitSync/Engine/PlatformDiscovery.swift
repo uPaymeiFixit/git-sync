@@ -96,9 +96,14 @@ struct GitLabClient: PlatformDiscovery {
     let token: String          // PRIVATE-TOKEN
     let includeArchived: Bool
     let syncRoot: URL
+    // The folder this provider's repos live in, and the base `rel` is relative
+    // to. Defaults to syncRoot/Gitlab (legacy single-provider path); the
+    // provider path passes the provider's own localPath. `rel` is therefore
+    // provider-local (no platform-dir prefix).
+    var localRoot: URL? = nil
 
     private var apiBase: String { "https://\(host)/api/v4" }
-    private var platformRoot: URL { syncRoot.appendingPathComponent("Gitlab") }
+    private var platformRoot: URL { localRoot ?? syncRoot.appendingPathComponent("Gitlab") }
     private let accept = "application/json"
     private var headers: [String: String] { ["PRIVATE-TOKEN": token] }
 
@@ -167,7 +172,7 @@ struct GitLabClient: PlatformDiscovery {
     }
 
     private func rel(_ dest: URL) -> String {
-        let root = syncRoot.standardizedFileURL.path
+        let root = platformRoot.standardizedFileURL.path
         let d = dest.standardizedFileURL.path
         return d.hasPrefix(root + "/") ? String(d.dropFirst(root.count + 1)) : d
     }
@@ -243,10 +248,11 @@ struct GitHubClient: PlatformDiscovery {
     let token: String          // GIT_SYNC_GITHUB_TOKEN (Bearer); netrc not ported (app uses token)
     let includeArchived: Bool
     let syncRoot: URL
+    var localRoot: URL? = nil  // provider folder; defaults to syncRoot/Github
 
     private let api = "https://api.github.com"
     var probeURL: URL? { URL(string: api) }
-    private var platformRoot: URL { syncRoot.appendingPathComponent("Github") }
+    private var platformRoot: URL { localRoot ?? syncRoot.appendingPathComponent("Github") }
     private var authHeader: String { "Bearer \(token)" }
     private let accept = "application/vnd.github+json"
     private var headers: [String: String] {
@@ -310,7 +316,7 @@ struct GitHubClient: PlatformDiscovery {
     }
 
     private func rel(_ dest: URL) -> String {
-        let root = syncRoot.standardizedFileURL.path
+        let root = platformRoot.standardizedFileURL.path
         let d = dest.standardizedFileURL.path
         return d.hasPrefix(root + "/") ? String(d.dropFirst(root.count + 1)) : d
     }
@@ -324,10 +330,11 @@ struct BitbucketClient: PlatformDiscovery {
     let user: String
     let appPassword: String
     let syncRoot: URL
+    var localRoot: URL? = nil  // provider folder; defaults to syncRoot/Bitbucket
 
     private let api = "https://api.bitbucket.org/2.0"
     var probeURL: URL? { URL(string: api) }
-    private var platformRoot: URL { syncRoot.appendingPathComponent("Bitbucket") }
+    private var platformRoot: URL { localRoot ?? syncRoot.appendingPathComponent("Bitbucket") }
     private let accept = "application/json"
     private var headers: [String: String] {
         let raw = "\(user):\(appPassword)".data(using: .utf8)!.base64EncodedString()
@@ -386,7 +393,7 @@ struct BitbucketClient: PlatformDiscovery {
     }
 
     private func rel(_ dest: URL) -> String {
-        let root = syncRoot.standardizedFileURL.path
+        let root = platformRoot.standardizedFileURL.path
         let d = dest.standardizedFileURL.path
         return d.hasPrefix(root + "/") ? String(d.dropFirst(root.count + 1)) : d
     }

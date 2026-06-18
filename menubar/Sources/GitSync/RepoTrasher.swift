@@ -37,24 +37,35 @@ struct TrashReport: Sendable {
 enum RepoTrasher {
     // Runs off the caller's actor; sequential per repo (deletes are rare
     // and small batches; git status is ~20ms each).
-    static func trash(ids: [RepoID], under syncRoot: URL) async -> TrashReport {
+    // `resolve` maps each RepoID to its absolute on-disk path (provider.localPath
+    // + provider-local rel). `allowedRoots` are the provider folders a target
+    // must live under — defense-in-depth so a malformed rel can never escape a
+    // configured provider folder and trash something unrelated.
+    static func trash(ids: [RepoID],
+                      resolve: @escaping @Sendable (RepoID) -> URL?,
+                      allowedRoots: [URL]) async -> TrashReport {
         await Task.detached(priority: .userInitiated) {
-            trashSync(ids: ids, under: syncRoot)
+            trashSync(ids: ids, resolve: resolve, allowedRoots: allowedRoots)
         }.value
     }
 
-    private static func trashSync(ids: [RepoID], under syncRoot: URL) -> TrashReport {
+    private static func trashSync(ids: [RepoID],
+                                  resolve: (RepoID) -> URL?,
+                                  allowedRoots: [URL]) -> TrashReport {
         var report = TrashReport()
         let fm = FileManager.default
-        let rootPath = syncRoot.standardizedFileURL.path
+        let rootPaths = allowedRoots.map { $0.standardizedFileURL.path }
 
         for id in ids {
-            let target = syncRoot.appendingPathComponent(id.rel).standardizedFileURL
+            guard let target = resolve(id)?.standardizedFileURL else {
+                report.skipped.append((id, "no provider folder for this repo"))
+                continue
+            }
 
-            // Defense in depth: never operate outside the sync root, even
-            // if a malformed rel sneaks into the inventory.
-            guard target.path.hasPrefix(rootPath + "/") else {
-                report.skipped.append((id, "path escapes sync root"))
+            // Defense in depth: the target must live under one of the
+            // configured provider folders, even if a malformed rel sneaks in.
+            guard rootPaths.contains(where: { target.path.hasPrefix($0 + "/") }) else {
+                report.skipped.append((id, "path escapes provider folder"))
                 continue
             }
             guard fm.fileExists(atPath: target.path) else {

@@ -87,6 +87,7 @@ private struct EventEnvelope: Decodable {
         case "remote_project":
             let p = try decoder.decode(RemoteProjectPayload.self, from: data)
             return .remoteProject(
+                providerID: p.providerID ?? "",
                 platform: p.platform.isEmpty ? platform : p.platform,
                 rel: p.rel,
                 sshURL: p.sshURL,
@@ -111,10 +112,12 @@ private struct RemoteProjectPayload: Decodable {
     let rel: String
     let sshURL: String
     let defaultBranch: String
+    let providerID: String?     // native engine only; Python path omits it
 
     enum CodingKeys: String, CodingKey {
         case platform, rel
         case sshURL = "ssh_url"
         case defaultBranch = "default_branch"
+        case providerID = "provider_id"
     }
 }

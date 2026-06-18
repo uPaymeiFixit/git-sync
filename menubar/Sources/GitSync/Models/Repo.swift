@@ -1,29 +1,51 @@
 import Foundation
 
 // Identity for a single remote-known or locally-cloned repository.
-// (platform, rel) is stable across runs and survives outcome state
-// changes — unlike the older Outcome.id-by-status formula.
 //
-// NOTE (provider work, in progress): the provider abstraction will move
-// identity to (providerID, provider-local rel). That change is intentionally
-// NOT yet wired — see memory `roadmap-whitelist-providers-onboarding` and the
-// `provider-model-scaffolding` note. RepoID stays (platform, rel) until the
-// inventory migration is built + verified against real data with the user.
+// Identity is (providerID, rel). `rel` is PROVIDER-LOCAL — the repo's path
+// within its provider's folder, with NO platform-dir prefix (e.g.
+// "development/foo/bar"). The on-disk path is provider.localPath + rel, which
+// is what lets each provider live in a user-chosen folder and lets two
+// providers of the same kind coexist without colliding.
+//
+// `platform` is the API DIALECT / display kind ("gitlab"/"github"/"bitbucket")
+// — NOT part of identity (two providers can share a kind). It's retained for
+// display, skip/whitelist dialect, and as a fallback identity component for
+// rows whose providerID isn't known yet (pre-migration / Python path).
+//
+// Back-compat: older inventory.json keyed by {platform, "Gitlab/foo"} decodes
+// with providerID == "" and the prefixed rel intact; InventoryStore's one-time
+// migration re-keys those to a real providerID and strips the prefix.
 struct RepoID: Hashable, Codable, Sendable, CustomStringConvertible {
-    let platform: String
-    let rel: String
+    let providerID: String       // Provider.id.uuidString; "" = not-yet-migrated
+    let platform: String         // ProviderKind rawValue — dialect/display only
+    let rel: String              // provider-local path (no platform-dir prefix once migrated)
 
-    var description: String { "\(platform):\(rel)" }
+    init(providerID: String = "", platform: String, rel: String) {
+        self.providerID = providerID
+        self.platform = platform
+        self.rel = rel
+    }
 
-    // The repo path as the platform knows it — rel minus the leading
-    // platform directory. This is the format GIT_SYNC_SKIP patterns use
-    // (the Python matches them against path_with_namespace / name / slug,
-    // never against the on-disk platform-dir-prefixed path).
+    var description: String {
+        providerID.isEmpty ? "\(platform):\(rel)" : "\(platform)#\(providerID.prefix(8)):\(rel)"
+    }
+
+    // The repo path as the platform knows it (for skip/whitelist matching).
+    // Post-migration `rel` is already prefix-free; pre-migration we still strip
+    // a leading capitalized platform dir defensively.
     var namespacePath: String {
         for prefix in ["Gitlab/", "Github/", "Bitbucket/"] where rel.hasPrefix(prefix) {
             return String(rel.dropFirst(prefix.count))
         }
         return rel
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        platform = try c.decode(String.self, forKey: .platform)
+        rel = try c.decode(String.self, forKey: .rel)
+        providerID = try c.decodeIfPresent(String.self, forKey: .providerID) ?? ""
     }
 }
 

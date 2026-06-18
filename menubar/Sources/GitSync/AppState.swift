@@ -20,6 +20,7 @@ final class AppState: ObservableObject {
     private let settingsStore: SettingsStore
     private let history: HistoryStore
     let inventory: InventoryStore
+    let providers: ProviderStore
     let eventBuffer = EventBuffer()
     private var drainTimer: Timer?
     // Reference count for the shared 10Hz drain timer. The full run and each
@@ -44,10 +45,11 @@ final class AppState: ObservableObject {
         ProcessInfo.processInfo.environment["GIT_SYNC_USE_PYTHON"] != "1"
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
 
-    init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore) {
+    init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore, providers: ProviderStore) {
         self.settingsStore = settings
         self.history = history
         self.inventory = inventory
+        self.providers = providers
     }
 
     // Called by App.swift whenever a schedule-related setting changes,
@@ -116,13 +118,25 @@ final class AppState: ObservableObject {
         }
     }
 
-    // Overlay per-platform whitelist config onto a run's env. The filter mode
-    // lives in SettingsStore but the tracked set lives in the inventory, so
-    // AppState (which has both) is the only place that can assemble it. The
-    // engine reads GIT_SYNC_FILTER_MODE_<P> / GIT_SYNC_TRACKED_<P> the same way
-    // it reads GIT_SYNC_SKIP.
+    // Build the run snapshot: attach the resolved provider list (each provider
+    // + its Keychain token + tracked rels) for the native engine to iterate,
+    // AND keep the per-platform whitelist env vars for the legacy Python path.
+    // The filter mode + token live in the provider/settings stores while the
+    // tracked set lives in the inventory, so AppState (which has all three) is
+    // the only place that can assemble this.
     private func withTrackingEnv(_ settings: SyncSettings) -> SyncSettings {
         var s = settings
+
+        // Native engine: the resolved provider list.
+        s.providers = providers.enabledProviders.map { p in
+            ResolvedProvider(
+                provider: p,
+                token: providers.token(for: p),
+                trackedRels: p.filterMode == .trackedOnly
+                    ? inventory.trackedRels(providerID: p.id.uuidString) : [])
+        }
+
+        // Legacy Python path: per-platform whitelist env (single provider/kind).
         for platform in Platform.allCases {
             let key = platform.rawValue
             let mode = settingsStore.filterMode(platform: key)
@@ -148,9 +162,14 @@ final class AppState: ObservableObject {
     // Inventory rows update to match: stale/disk-only repos disappear
     // entirely; remote-known repos revert to "not cloned yet".
     func deleteLocalRepos(_ ids: Set<RepoID>) async -> TrashReport {
-        let root = URL(fileURLWithPath:
-            (settingsStore.syncRoot as NSString).expandingTildeInPath)
-        let report = await RepoTrasher.trash(ids: Array(ids), under: root)
+        // Resolve each repo's on-disk path via its provider folder, and bound
+        // the trash to the configured provider folders (defense in depth).
+        let resolver = diskPathResolver()
+        let allowed = allowedRoots()
+        let report = await RepoTrasher.trash(
+            ids: Array(ids),
+            resolve: { resolver($0) },
+            allowedRoots: allowed)
         for id in report.trashed {
             let repo = inventory.repos[id]
             let remoteStillHasIt = repo?.lastSeenRemoteAt != nil
@@ -162,6 +181,47 @@ final class AppState: ObservableObject {
             }
         }
         return report
+    }
+
+    // ---- Disk-path resolution (single source of truth) ---------------
+
+    // A repo's on-disk folder = its provider's localPath + provider-local rel.
+    // Falls back to syncRoot/<DefaultDir> for rows whose providerID doesn't
+    // match a configured provider (pre-migration / legacy / Python path), where
+    // rel may still carry the platform-dir prefix.
+    func diskPath(for id: RepoID) -> URL? {
+        if let p = providers.provider(id: UUID(uuidString: id.providerID) ?? UUID()) {
+            return URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)
+                .appendingPathComponent(id.rel)
+        }
+        // Legacy fallback: syncRoot + rel (rel here still includes the dir).
+        let root = URL(fileURLWithPath: (settingsStore.syncRoot as NSString).expandingTildeInPath)
+        return root.appendingPathComponent(id.rel)
+    }
+
+    // A Sendable snapshot resolver (provider folders captured now) for handing
+    // to RepoTrasher off the main actor.
+    private func diskPathResolver() -> @Sendable (RepoID) -> URL? {
+        let byID = Dictionary(uniqueKeysWithValues:
+            providers.providers.map { ($0.id.uuidString, $0.resolvedLocalPath) })
+        let legacyRoot = (settingsStore.syncRoot as NSString).expandingTildeInPath
+        return { id in
+            if let root = byID[id.providerID] {
+                return URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent(id.rel)
+            }
+            return URL(fileURLWithPath: legacyRoot, isDirectory: true).appendingPathComponent(id.rel)
+        }
+    }
+
+    // The folders a trash target must live under (provider folders + the legacy
+    // sync root for un-migrated rows).
+    private func allowedRoots() -> [URL] {
+        var roots = providers.providers.map {
+            URL(fileURLWithPath: $0.resolvedLocalPath, isDirectory: true)
+        }
+        roots.append(URL(fileURLWithPath: (settingsStore.syncRoot as NSString).expandingTildeInPath,
+                         isDirectory: true))
+        return roots
     }
 
     // ---- Whitelist / Track mode --------------------------------------
@@ -351,8 +411,8 @@ final class AppState: ObservableObject {
         case .outcome(_, let outcome):
             currentRun?.outcomes.append(outcome)
             inventory.apply(outcome: outcome)
-        case .remoteProject(let platform, let rel, let sshURL, let defaultBranch):
-            inventory.apply(remoteProject: platform, rel: rel,
+        case .remoteProject(let providerID, let platform, let rel, let sshURL, let defaultBranch):
+            inventory.apply(remoteProject: providerID, platform: platform, rel: rel,
                             sshURL: sshURL, defaultBranch: defaultBranch)
         case .phase(let label):
             // Normally coalesced into batch.runPhase; handled here too for

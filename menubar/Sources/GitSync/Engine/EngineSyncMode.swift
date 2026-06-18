@@ -23,7 +23,7 @@ enum EngineSyncMode {
 
         func emit(_ event: SyncEvent) async {
             switch event {
-            case .remoteProject(_, let rel, _, _):
+            case .remoteProject(_, _, let rel, _, _):
                 if listOnly { FileHandle.standardError.write(Data("  remote: \(rel)\n".utf8)) }
             case .outcome(_, let o):
                 appendOutcome(o)

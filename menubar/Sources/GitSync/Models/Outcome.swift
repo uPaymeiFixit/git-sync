@@ -16,8 +16,11 @@ struct Outcome: Codable, Hashable, Identifiable, Sendable {
     let oldSha: String
     let newSha: String
     let commitsAhead: Int
+    // Which provider produced this. Native-engine-only (the Python path leaves
+    // it ""); the engine stamps it so the inventory can key the row by provider.
+    let providerID: String
 
-    var id: String { "\(platform)\u{1F}\(rel)" }
+    var id: String { "\(providerID)\u{1F}\(platform)\u{1F}\(rel)" }
 
     init(
         platform: String = "",
@@ -27,7 +30,8 @@ struct Outcome: Codable, Hashable, Identifiable, Sendable {
         detail: String = "",
         oldSha: String = "",
         newSha: String = "",
-        commitsAhead: Int = 0
+        commitsAhead: Int = 0,
+        providerID: String = ""
     ) {
         self.platform = platform
         self.rel = rel
@@ -37,6 +41,14 @@ struct Outcome: Codable, Hashable, Identifiable, Sendable {
         self.oldSha = oldSha
         self.newSha = newSha
         self.commitsAhead = commitsAhead
+        self.providerID = providerID
+    }
+
+    // Same outcome with providerID set — the engine stamps this after
+    // RepoSyncer (which is provider-agnostic) returns.
+    func withProviderID(_ pid: String) -> Outcome {
+        Outcome(platform: platform, rel: rel, status: status, url: url, detail: detail,
+                oldSha: oldSha, newSha: newSha, commitsAhead: commitsAhead, providerID: pid)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -44,6 +56,7 @@ struct Outcome: Codable, Hashable, Identifiable, Sendable {
         case oldSha = "old_sha"
         case newSha = "new_sha"
         case commitsAhead = "commits_ahead"
+        case providerID = "provider_id"
     }
 
     init(from decoder: Decoder) throws {
@@ -56,5 +69,6 @@ struct Outcome: Codable, Hashable, Identifiable, Sendable {
         self.oldSha = (try? c.decode(String.self, forKey: .oldSha)) ?? ""
         self.newSha = (try? c.decode(String.self, forKey: .newSha)) ?? ""
         self.commitsAhead = (try? c.decode(Int.self, forKey: .commitsAhead)) ?? 0
+        self.providerID = (try? c.decode(String.self, forKey: .providerID)) ?? ""
     }
 }

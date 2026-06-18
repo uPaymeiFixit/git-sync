@@ -5,6 +5,7 @@ struct GitSyncApp: App {
     @StateObject private var settings: SettingsStore
     @StateObject private var history: HistoryStore
     @StateObject private var inventory: InventoryStore
+    @StateObject private var providers: ProviderStore
     @StateObject private var state: AppState
 
     init() {
@@ -68,6 +69,9 @@ struct GitSyncApp: App {
         if args.contains("--provider-validation-test") {
             exit(ProviderValidationTest.run())
         }
+        if args.contains("--provider-migration-test") {
+            exit(ProviderMigrationTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the
@@ -75,22 +79,25 @@ struct GitSyncApp: App {
         // can absorb remote_project + outcome events as they stream in.
         let settingsStore = SettingsStore()
         let historyStore = HistoryStore()
-        let inventoryStore = InventoryStore()
+        let providerStore = ProviderStore()   // migrates legacy config on first run
+        let inventoryStore = InventoryStore(providers: providerStore.providers)
         _settings  = StateObject(wrappedValue: settingsStore)
         _history   = StateObject(wrappedValue: historyStore)
+        _providers = StateObject(wrappedValue: providerStore)
         _inventory = StateObject(wrappedValue: inventoryStore)
         _state     = StateObject(wrappedValue: AppState(
             settings: settingsStore,
             history: historyStore,
-            inventory: inventoryStore
+            inventory: inventoryStore,
+            providers: providerStore
         ))
 
-        // Seed the inventory on first launch (best-effort, async).
+        // Seed the inventory on first launch (best-effort, async). The disk
+        // walk now needs the provider list (each provider has its own folder).
+        let provs = providerStore.providers
         Task { @MainActor in
             inventoryStore.seedFromHistory(historyStore)
-            let syncRoot = URL(fileURLWithPath:
-                (settingsStore.syncRoot as NSString).expandingTildeInPath)
-            await inventoryStore.seedFromDisk(syncRoot: syncRoot)
+            await inventoryStore.seedFromDisk(providers: provs)
         }
     }
 

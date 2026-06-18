@@ -23,9 +23,13 @@ final class InventoryStore: ObservableObject {
     @Published private(set) var repos: [RepoID: Repo] = [:]
 
     private let storageURL: URL
+    private let backupURL: URL
     private var saveDebounceTimer: Timer?
+    // The provider list, for resolving a legacy {platform, "Gitlab/foo"} row to
+    // its owning provider during migration and for the disk walk.
+    private let providersAtLaunch: [Provider]
 
-    init() {
+    init(providers: [Provider]) {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first ?? FileManager.default.homeDirectoryForCurrentUser
@@ -33,13 +37,15 @@ final class InventoryStore: ObservableObject {
         let dir = appSupport.appendingPathComponent("GitSync", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.storageURL = dir.appendingPathComponent("inventory.json")
+        self.backupURL = dir.appendingPathComponent("inventory.json.bak")
+        self.providersAtLaunch = providers
         loadFromDisk()
     }
 
     // ---- Event ingestion ---------------------------------------------
 
-    func apply(remoteProject platform: String, rel: String, sshURL: String, defaultBranch: String) {
-        let id = RepoID(platform: platform, rel: rel)
+    func apply(remoteProject providerID: String, platform: String, rel: String, sshURL: String, defaultBranch: String) {
+        let id = RepoID(providerID: providerID, platform: platform, rel: rel)
         var repo = repos[id] ?? Repo(id: id)
         repo.sshURL = sshURL
         if !defaultBranch.isEmpty {
@@ -54,7 +60,7 @@ final class InventoryStore: ObservableObject {
         // Outcome carries platform now (see Outcome.platform). If empty
         // (very old fixture data), we can't key it — drop.
         guard !outcome.platform.isEmpty else { return }
-        let id = RepoID(platform: outcome.platform, rel: outcome.rel)
+        let id = RepoID(providerID: outcome.providerID, platform: outcome.platform, rel: outcome.rel)
         var repo = repos[id] ?? Repo(id: id)
         if !outcome.url.isEmpty {
             repo.sshURL = outcome.url
@@ -117,12 +123,19 @@ final class InventoryStore: ObservableObject {
         if changed { scheduleSave() }
     }
 
-    // The tracked repos for a platform, as canonical rels — handed to the
-    // engine (via the run env) so it knows which repos to sync in trackedOnly
-    // mode. Empty set = nothing tracked yet.
+    // The tracked repos for a platform, as rels — for the legacy Python path
+    // (single provider per kind). Empty set = nothing tracked yet.
     func trackedRels(platform: String) -> [String] {
         repos.values
             .filter { $0.id.platform == platform && $0.isTracked }
+            .map { $0.id.rel }
+    }
+
+    // The tracked repos for a provider, as provider-local rels — handed to the
+    // native engine so it knows which repos to sync in trackedOnly mode.
+    func trackedRels(providerID: String) -> [String] {
+        repos.values
+            .filter { $0.id.providerID == providerID && $0.isTracked }
             .map { $0.id.rel }
     }
 
@@ -153,16 +166,24 @@ final class InventoryStore: ObservableObject {
 
     // ---- Seeding (launch-time fill) ----------------------------------
 
-    // Walk GIT_SYNC_ROOT looking for .git directories. Each one becomes
-    // a Repo with isClonedLocally = true. Doesn't touch ones we already
-    // know about (preserves any remote-side fields from a prior session).
-    func seedFromDisk(syncRoot: URL) async {
-        let found: [(platform: String, rel: String)] = await Task.detached(priority: .utility) {
-            findClonedRepos(under: syncRoot)
+    // Walk each provider's folder looking for .git directories. Each one
+    // becomes a Repo keyed by that provider with a provider-local rel. Doesn't
+    // touch ones we already know about (preserves remote-side fields).
+    func seedFromDisk(providers: [Provider]) async {
+        struct Found: Sendable { let providerID: String; let platform: String; let rel: String }
+        let specs = providers.map { (id: $0.id.uuidString, platform: $0.kind.rawValue, root: $0.resolvedLocalPath) }
+        let found: [Found] = await Task.detached(priority: .utility) {
+            var out: [Found] = []
+            for spec in specs {
+                for rel in clonedRelsUnder(root: spec.root) {
+                    out.append(Found(providerID: spec.id, platform: spec.platform, rel: rel))
+                }
+            }
+            return out
         }.value
         let now = Date()
         for entry in found {
-            let id = RepoID(platform: entry.platform, rel: entry.rel)
+            let id = RepoID(providerID: entry.providerID, platform: entry.platform, rel: entry.rel)
             var repo = repos[id] ?? Repo(id: id)
             repo.isClonedLocally = true
             repo.lastClonedCheckedAt = now
@@ -171,16 +192,24 @@ final class InventoryStore: ObservableObject {
         if !found.isEmpty { scheduleSave() }
     }
 
-    // Iterate history newest-first, applying any outcome whose repo
-    // doesn't already have a `lastStatus`. This gives the inventory a
-    // reasonable initial state even if no sync has run since the app
-    // gained inventory support.
+    // Iterate history newest-first, applying any outcome whose repo doesn't
+    // already have a `lastStatus`. Outcomes from older runs have providerID ""
+    // and a prefixed rel — map them the same way the inventory migration does
+    // so history-seeded rows share identity with migrated rows (else ghost
+    // duplicates reappear).
     func seedFromHistory(_ history: HistoryStore) {
         for run in history.runs {
             for outcome in run.outcomes where !outcome.platform.isEmpty {
-                let id = RepoID(platform: outcome.platform, rel: outcome.rel)
+                var o = outcome
+                if o.providerID.isEmpty, let prov = providerFor(legacyPlatform: o.platform, rel: o.rel) {
+                    o = Outcome(platform: o.platform, rel: Self.stripDirPrefix(o.rel),
+                                status: o.status, url: o.url, detail: o.detail,
+                                oldSha: o.oldSha, newSha: o.newSha,
+                                commitsAhead: o.commitsAhead, providerID: prov.id.uuidString)
+                }
+                let id = RepoID(providerID: o.providerID, platform: o.platform, rel: o.rel)
                 if repos[id]?.lastStatus != nil { continue }
-                apply(outcome: outcome)
+                apply(outcome: o)
             }
         }
     }
@@ -194,45 +223,71 @@ final class InventoryStore: ObservableObject {
         if let stored = try? decoder.decode([Repo].self, from: data) {
             for repo in stored { repos[repo.id] = repo }
         }
-        migrateLegacyKeys()
+        migrateToProviders(rawData: data)
     }
 
-    // The canonical rel format matches the Python's _rel(): relative to
-    // GIT_SYNC_ROOT, INCLUDING the platform directory ("Gitlab/foo/bar").
-    // An early version of the disk walk produced platform-root-relative
-    // rels ("foo/bar"), creating orphan duplicates that never matched
-    // incoming outcomes and showed as eternally not-cloned-yet. Re-key
-    // those and merge into the canonical entry.
-    private func migrateLegacyKeys() {
+    // One-time migration to provider-keyed identity. Pre-provider rows decode
+    // with providerID == "" and rel still carrying the capitalized platform dir
+    // ("Gitlab/foo/bar"). We re-key each to its owning provider and strip the
+    // prefix so rel becomes provider-local ("foo/bar").
+    //
+    // Mapping a legacy row → provider: match by kind AND the dir the rel is
+    // prefixed with (so a future config with two same-kind providers still maps
+    // deterministically by folder), falling back to the first enabled provider
+    // of that kind. A row that matches no provider is left as-is (providerID
+    // still "") — harmless: it shows in the inventory but won't collide.
+    //
+    // SAFETY: we back up the raw inventory.json to inventory.json.bak BEFORE
+    // rewriting, and only rewrite if something actually changed. The inventory
+    // is a rebuildable cache anyway (disk walk + a sync repopulate it), so the
+    // worst case is fully recoverable.
+    private func migrateToProviders(rawData: Data) {
+        let needsMigration = repos.keys.contains { $0.providerID.isEmpty }
+        guard needsMigration, !providersAtLaunch.isEmpty else { return }
+
+        // Back up the original before touching anything.
+        try? rawData.write(to: backupURL, options: .atomic)
+
         var migrated: [RepoID: Repo] = [:]
-        var changed = false
         for (id, repo) in repos {
-            let canonical = RepoID(
-                platform: id.platform,
-                rel: Self.canonicalRel(platform: id.platform, rel: id.rel)
-            )
-            if canonical != id { changed = true }
-            if let existing = migrated[canonical] {
-                migrated[canonical] = Self.merge(existing, repo.reKeyed(to: canonical))
+            let newID: RepoID
+            if id.providerID.isEmpty, let prov = providerFor(legacyPlatform: id.platform, rel: id.rel) {
+                // Strip the leading "<DefaultDir>/" the legacy rel carried.
+                let bareRel = Self.stripDirPrefix(id.rel)
+                newID = RepoID(providerID: prov.id.uuidString, platform: id.platform, rel: bareRel)
             } else {
-                migrated[canonical] = repo.reKeyed(to: canonical)
+                newID = id   // already migrated, or no matching provider
+            }
+            if let existing = migrated[newID] {
+                migrated[newID] = Self.merge(existing, repo.reKeyed(to: newID))
+            } else {
+                migrated[newID] = repo.reKeyed(to: newID)
             }
         }
-        if changed {
-            repos = migrated
-            saveNow()
-        }
+        repos = migrated
+        saveNow()
     }
 
-    static func canonicalRel(platform: String, rel: String) -> String {
-        let prefix: String
-        switch platform {
-        case "gitlab":    prefix = "Gitlab/"
-        case "github":    prefix = "Github/"
-        case "bitbucket": prefix = "Bitbucket/"
-        default:          return rel
+    // Resolve a legacy {platform, prefixed-rel} row to its provider: prefer the
+    // provider of that kind whose defaultDirName matches the rel's prefix; else
+    // the first provider of that kind.
+    private func providerFor(legacyPlatform platform: String, rel: String) -> Provider? {
+        let kind = ProviderKind(rawValue: platform)
+        let ofKind = providersAtLaunch.filter { kind == nil || $0.kind == kind }
+        guard !ofKind.isEmpty else { return nil }
+        if let prefix = rel.split(separator: "/").first.map(String.init) {
+            if let byDir = ofKind.first(where: { $0.kind.defaultDirName == prefix }) {
+                return byDir
+            }
         }
-        return rel.hasPrefix(prefix) ? rel : prefix + rel
+        return ofKind.first
+    }
+
+    private static func stripDirPrefix(_ rel: String) -> String {
+        for prefix in ["Gitlab/", "Github/", "Bitbucket/"] where rel.hasPrefix(prefix) {
+            return String(rel.dropFirst(prefix.count))
+        }
+        return rel
     }
 
     // Merge two records for the same repo: prefer whichever has actual
@@ -280,39 +335,27 @@ final class InventoryStore: ObservableObject {
 
 // MARK: - Disk walk helper
 
-// Returns (platform, rel) pairs for every .git directory under syncRoot.
-// Bounded depth: looks for repos like syncRoot/<Platform>/<a>/<b>/.../.git,
-// stops descending into a directory once a .git is found inside it.
-// Tolerant of missing platform subdirectories.
-private nonisolated func findClonedRepos(under syncRoot: URL) -> [(platform: String, rel: String)] {
-    var out: [(platform: String, rel: String)] = []
+// Returns provider-LOCAL rels for every .git directory under one provider's
+// root folder (e.g. "development/foo/bar"). Stops descending once a .git is
+// found. The caller pairs these with the provider's id/kind.
+private nonisolated func clonedRelsUnder(root: String) -> [String] {
+    var out: [String] = []
     let fm = FileManager.default
-    // Platform subdirectories are capitalized (Bitbucket/, Gitlab/, Github/)
-    // per scripts/_sync.py:PLATFORM_ROOT conventions. We lower-case the
-    // platform when storing.
-    let platformNames = ["Gitlab": "gitlab", "Github": "github", "Bitbucket": "bitbucket"]
-    for (dirName, platform) in platformNames {
-        let platformRoot = syncRoot.appendingPathComponent(dirName, isDirectory: true)
-        guard fm.fileExists(atPath: platformRoot.path) else { continue }
-        guard let enumerator = fm.enumerator(
-            at: platformRoot,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { continue }
+    let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+    guard fm.fileExists(atPath: rootURL.path) else { return out }
+    guard let enumerator = fm.enumerator(
+        at: rootURL,
+        includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles, .skipsPackageDescendants]
+    ) else { return out }
 
-        for case let url as URL in enumerator {
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            guard isDir else { continue }
-            let gitDir = url.appendingPathComponent(".git")
-            if fm.fileExists(atPath: gitDir.path) {
-                // Canonical rel format: relative to syncRoot INCLUDING the
-                // platform directory ("Gitlab/foo/bar"), matching the
-                // Python's _rel() so disk-seeded entries share identity
-                // with event-driven ones.
-                let sub = url.path.dropFirst(platformRoot.path.count + 1)
-                out.append((platform: platform, rel: "\(dirName)/\(sub)"))
-                enumerator.skipDescendants()
-            }
+    let prefixLen = rootURL.path.count + 1
+    for case let url as URL in enumerator {
+        let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+        guard isDir else { continue }
+        if fm.fileExists(atPath: url.appendingPathComponent(".git").path) {
+            out.append(String(url.path.dropFirst(prefixLen)))   // provider-local
+            enumerator.skipDescendants()
         }
     }
     return out
