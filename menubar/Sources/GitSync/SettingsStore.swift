@@ -40,11 +40,10 @@ final class SettingsStore: ObservableObject {
         static let filterModeByPlatform   = "filterModeByPlatform"   // [platform rawValue: FilterMode raw]
         static let hasCompletedSetup      = "hasCompletedSetup"      // first-launch onboarding done
     }
-    private enum KKey {
-        static let githubToken         = "github_token"
-        static let gitlabToken         = "gitlab_token"
-        static let bitbucketPassword   = "bitbucket_app_password"
-    }
+    // Legacy single-per-kind Keychain account names. Shared with ProviderStore
+    // so the provider-migration's token lookup can't drift from these (a
+    // mismatch silently drops the token — see ProviderStore.legacyTokenKey).
+    typealias KKey = LegacyKeychainKey
 
     // ---- UserDefaults-backed scalars (auto-publishing) ----------------
     @Published var syncRoot: String {

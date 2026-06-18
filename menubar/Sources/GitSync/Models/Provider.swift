@@ -1,5 +1,23 @@
 import Foundation
 
+// The legacy (pre-provider) single-per-kind Keychain account names. The single
+// source of truth shared by SettingsStore (which wrote them) and ProviderStore
+// (which migrates from them). Keeping them here prevents the wrong-key drift
+// that silently dropped tokens during the first provider migration.
+enum LegacyKeychainKey {
+    static let githubToken       = "github_token"
+    static let gitlabToken       = "gitlab_token"
+    static let bitbucketPassword = "bitbucket_app_password"
+
+    static func forKind(_ kind: ProviderKind) -> String {
+        switch kind {
+        case .gitlab:    return gitlabToken
+        case .github:    return githubToken
+        case .bitbucket: return bitbucketPassword
+        }
+    }
+}
+
 // A configured sync source. Decouples the platform TYPE (which API dialect
 // to speak — `kind`) from a specific INSTANCE (this host + this token + this
 // scope + this disk folder). That's what lets a user have, say, two GitLab

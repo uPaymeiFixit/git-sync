@@ -141,6 +141,11 @@ final class ProviderStore: ObservableObject {
     // that existed before this feature, so nothing changes for existing users.
     private func migrateFromLegacyIfNeeded() {
         let d = UserDefaults.standard
+        // Even if the initial migration already ran, BACKFILL any provider
+        // whose per-provider token is empty from the (correctly-named) legacy
+        // key — repairs the wrong-key bug for users already migrated.
+        backfillMissingTokens()
+
         // Already migrated, or the user already has providers → nothing to do.
         guard !d.bool(forKey: migratedKey) else { return }
         guard providers.isEmpty else { d.set(true, forKey: migratedKey); return }
@@ -160,7 +165,7 @@ final class ProviderStore: ObservableObject {
                              host: glHost, scope: "",
                              includeArchived: d.bool(forKey: "includeArchived"),
                              localPath: path("Gitlab"), filterMode: mode("gitlab"))
-            if let tok = Keychain.get("gitlabToken"), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
+            if let tok = Keychain.get(LegacyKeychainKey.gitlabToken), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
             migrated.append(p); _ = p
         }
         let ghOrg = d.string(forKey: "githubOrg") ?? ""
@@ -170,7 +175,7 @@ final class ProviderStore: ObservableObject {
                              host: "github.com", scope: ghOrg,
                              includeArchived: d.bool(forKey: "includeArchived"),
                              localPath: path("Github"), filterMode: mode("github"))
-            if let tok = Keychain.get("githubToken"), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
+            if let tok = Keychain.get(LegacyKeychainKey.githubToken), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
             migrated.append(p)
         }
         let bbWs = d.string(forKey: "bitbucketWorkspace") ?? ""
@@ -180,12 +185,25 @@ final class ProviderStore: ObservableObject {
                              host: "bitbucket.org", scope: bbWs,
                              bitbucketUser: d.string(forKey: "bitbucketUser") ?? "",
                              localPath: path("Bitbucket"), filterMode: mode("bitbucket"))
-            if let tok = Keychain.get("bitbucketPassword"), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
+            if let tok = Keychain.get(LegacyKeychainKey.bitbucketPassword), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
             migrated.append(p)
         }
 
         providers = migrated
         save()
         d.set(true, forKey: migratedKey)
+        backfillMissingTokens()   // copy tokens into the just-created providers
+    }
+
+    // For each provider with an empty per-provider token, copy from the legacy
+    // single-per-kind Keychain key. Idempotent + safe to run every launch:
+    // does nothing once a provider has its own token. This is what repairs the
+    // already-migrated user whose tokens didn't copy due to the wrong-key bug.
+    private func backfillMissingTokens() {
+        for p in providers where token(for: p).isEmpty {
+            if let tok = Keychain.get(LegacyKeychainKey.forKind(p.kind)), !tok.isEmpty {
+                Keychain.set(tok, for: p.tokenKeychainKey)
+            }
+        }
     }
 }
