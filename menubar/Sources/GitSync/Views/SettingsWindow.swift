@@ -5,7 +5,7 @@ struct SettingsWindow: View {
 
     var body: some View {
         TabView {
-            PathsTab().tabItem { Label("Paths", systemImage: "folder") }
+            PathsTab().tabItem { Label("Locations", systemImage: "folder") }
             ProvidersTab().tabItem { Label("Providers", systemImage: "rectangle.connected.to.line.below") }
             BehaviorTab().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
             ScheduleTab().tabItem { Label("Schedule", systemImage: "clock") }
@@ -25,10 +25,10 @@ private struct PathsTab: View {
     @EnvironmentObject private var settings: SettingsStore
     var body: some View {
         Form {
-            Section("Sync root") {
+            Section("Default location") {
                 FolderField(value: $settings.syncRoot,
-                            prompt: "/Users/you/git/synced")
-                Text("Where mirrored repos are cloned. Bitbucket/, Gitlab/, Github/ subdirectories are created underneath.")
+                            prompt: "/Users/you/git")
+                Text("The starting folder suggested when you add a new provider. Each provider sets its own folder under the Providers tab — that's where its repos actually clone. This is only the default the picker opens to.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -56,28 +56,10 @@ private struct BehaviorTab: View {
                         Text(settings.depth == 0 ? "full history" : "\(settings.depth)")
                     }
                 }
-                Toggle("Include archived repos", isOn: $settings.includeArchived)
-                    .toggleStyle(.checkbox)
             }
 
-            // Skip patterns gets its own Section without a LabeledContent
-            // row so the text area spans the full content width instead
-            // of being squeezed into the right-aligned value column.
             Section {
-                Text("Skip patterns")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $settings.skipPatterns)
-                    .font(.body)
-                    .frame(minHeight: 70, maxHeight: 110)
-                    .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                    )
-                Text("Comma-separated repo names or path prefixes to skip. Case-insensitive. Example: `legacy-monorepo, some-group/archive/`")
+                Text("“Include archived repos” and “Skip patterns” are now set per provider — open the Providers tab and edit a provider.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

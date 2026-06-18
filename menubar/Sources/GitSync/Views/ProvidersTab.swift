@@ -9,6 +9,7 @@ struct ProvidersTab: View {
     @EnvironmentObject private var state: AppState
     @State private var editing: Provider?
     @State private var isNew = false
+    @State private var selection: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,23 +24,29 @@ struct ProvidersTab: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List {
+                List(selection: $selection) {
                     ForEach(providers.providers) { p in
                         ProviderRow(provider: p)
-                            .contentShape(Rectangle())
-                            .onTapGesture { startEdit(p) }
+                            .tag(p.id)
+                            // Double-click is the familiar shortcut for "edit
+                            // the selected row" (Finder, list-based prefs);
+                            // single-click just selects, the pencil edits.
+                            .onTapGesture(count: 2) { startEdit(p) }
                     }
                 }
                 .listStyle(.inset(alternatesRowBackgrounds: true))
             }
 
             Divider()
-            HStack {
+            HStack(spacing: 2) {
                 Button { startAdd() } label: { Image(systemName: "plus") }
-                Button {
-                    if let sel = editing { providers.remove(id: sel.id) }
-                } label: { Image(systemName: "minus") }
-                .disabled(editing == nil)
+                    .help("Add a provider")
+                Button { removeSelected() } label: { Image(systemName: "minus") }
+                    .disabled(selection == nil)
+                    .help("Remove the selected provider")
+                Button { editSelected() } label: { Image(systemName: "pencil") }
+                    .disabled(selection == nil)
+                    .help("Edit the selected provider")
                 Spacer()
                 Text("\(providers.providers.count) provider(s)")
                     .font(.caption).foregroundStyle(.secondary)
@@ -62,6 +69,16 @@ struct ProvidersTab: View {
                            localPath: (base as NSString).appendingPathComponent("NewProvider"))
     }
     private func startEdit(_ p: Provider) { isNew = false; editing = p }
+
+    private func editSelected() {
+        guard let id = selection, let p = providers.provider(id: id) else { return }
+        startEdit(p)
+    }
+    private func removeSelected() {
+        guard let id = selection else { return }
+        providers.remove(id: id)
+        selection = nil
+    }
 }
 
 private struct ProviderRow: View {
@@ -112,6 +129,11 @@ private struct ProviderEditor: View {
                     Picker("Kind", selection: $draft.kind) {
                         ForEach(ProviderKind.allCases, id: \.self) { Text($0.titleName).tag($0) }
                     }
+                    .onChange(of: draft.kind) { _, newKind in
+                        // GitLab has no scope; clear any stale value so it can't
+                        // linger invisibly after switching away from GitHub/Bitbucket.
+                        if newKind == .gitlab { draft.scope = "" }
+                    }
                     Toggle("Enabled", isOn: $draft.enabled).toggleStyle(.checkbox)
                     if let e = validation.nameError {
                         Text(e).font(.caption).foregroundStyle(.red)
@@ -121,8 +143,14 @@ private struct ProviderEditor: View {
                     if draft.kind == .gitlab {
                         LabeledField(label: "Host", value: $draft.host, prompt: "gitlab.example.com")
                     }
-                    LabeledField(label: draft.kind.scopeLabel, value: $draft.scope,
-                                 prompt: draft.kind == .github ? "your-org" : draft.kind == .bitbucket ? "your-workspace" : "")
+                    // GitLab has no scope field: discovery lists every project
+                    // you're a member of (the API can't be narrowed to a group
+                    // here), so a "Group" box would be a no-op. Use per-provider
+                    // skip patterns to narrow a GitLab provider instead.
+                    if draft.kind != .gitlab {
+                        LabeledField(label: draft.kind.scopeLabel, value: $draft.scope,
+                                     prompt: draft.kind == .github ? "your-org" : "your-workspace")
+                    }
                     if draft.kind == .bitbucket {
                         LabeledField(label: "Username", value: $draft.bitbucketUser, prompt: "you")
                     }
@@ -142,6 +170,15 @@ private struct ProviderEditor: View {
                     Picker("Sync scope", selection: $draft.filterMode) {
                         ForEach(FilterMode.allCases, id: \.self) { Text($0.displayName).tag($0) }
                     }
+                }
+                Section("Skip patterns") {
+                    TextField("", text: $draft.skipPatterns,
+                              prompt: Text("legacy-monorepo, some-group/archive/"),
+                              axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(2...4)
+                    Text("Comma-separated repo names or path prefixes to skip for THIS provider. Case-insensitive.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)

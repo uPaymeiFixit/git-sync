@@ -15,10 +15,12 @@ final class ProviderStore: ObservableObject {
 
     private let defaultsKey = "providersV1"
     private let migratedKey = "providersMigratedFromLegacy"
+    private let skipMigratedKey = "providersSkipMigratedFromGlobal"
 
     init() {
         load()
         migrateFromLegacyIfNeeded()
+        migrateGlobalSkipIfNeeded()
     }
 
     // ---- CRUD --------------------------------------------------------
@@ -160,13 +162,13 @@ final class ProviderStore: ObservableObject {
 
         let glHost = d.string(forKey: "gitlabHost") ?? ""
         if !glHost.isEmpty {
-            var p = Provider(kind: .gitlab, name: "GitLab",
+            let p = Provider(kind: .gitlab, name: "GitLab",
                              enabled: !d.bool(forKey: "skipGitlab"),
                              host: glHost, scope: "",
                              includeArchived: d.bool(forKey: "includeArchived"),
                              localPath: path("Gitlab"), filterMode: mode("gitlab"))
             if let tok = Keychain.get(LegacyKeychainKey.gitlabToken), !tok.isEmpty { Keychain.set(tok, for: p.tokenKeychainKey) }
-            migrated.append(p); _ = p
+            migrated.append(p)
         }
         let ghOrg = d.string(forKey: "githubOrg") ?? ""
         if !ghOrg.isEmpty {
@@ -193,6 +195,25 @@ final class ProviderStore: ObservableObject {
         save()
         d.set(true, forKey: migratedKey)
         backfillMissingTokens()   // copy tokens into the just-created providers
+    }
+
+    // Skip patterns used to be one global GIT_SYNC_SKIP list shared by every
+    // platform; they're now per-provider. Seed each provider's skipPatterns
+    // from that global list ONCE so existing users keep their skips. Runs after
+    // the provider migration (so providers exist) and only if a provider hasn't
+    // already got its own patterns. The global key stays in UserDefaults for
+    // the legacy Python/no-providers fallback.
+    private func migrateGlobalSkipIfNeeded() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: skipMigratedKey) else { return }
+        let global = (d.string(forKey: "skipPatterns") ?? "").trimmingCharacters(in: .whitespaces)
+        if !global.isEmpty {
+            for i in providers.indices where providers[i].skipPatterns.trimmingCharacters(in: .whitespaces).isEmpty {
+                providers[i].skipPatterns = global
+            }
+            save()
+        }
+        d.set(true, forKey: skipMigratedKey)
     }
 
     // For each provider with an empty per-provider token, copy from the legacy

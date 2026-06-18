@@ -40,10 +40,12 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    // The scope field's user-facing label, which differs per dialect.
+    // The scope field's user-facing label, which differs per dialect. GitLab
+    // has no scope field in the UI (discovery can't be narrowed to a group),
+    // so its label is unused — kept only for switch exhaustiveness.
     var scopeLabel: String {
         switch self {
-        case .gitlab: return "Group (optional)"   // empty = all accessible projects
+        case .gitlab: return "Group"
         case .github: return "Organization"
         case .bitbucket: return "Workspace"
         }
@@ -81,6 +83,11 @@ struct Provider: Identifiable, Codable, Sendable, Hashable {
 
     var filterMode: FilterMode
 
+    // Comma-separated repo names / path-prefixes to skip, matched against this
+    // provider's platform-native namespace path (case-insensitive). Per-provider
+    // so a pattern meant for one source can't accidentally match another's repos.
+    var skipPatterns: String
+
     // Keychain account for this provider's secret token/app-password.
     var tokenKeychainKey: String { "provider.\(id.uuidString).token" }
 
@@ -98,7 +105,8 @@ struct Provider: Identifiable, Codable, Sendable, Hashable {
         bitbucketUser: String = "",
         includeArchived: Bool = false,
         localPath: String,
-        filterMode: FilterMode = .syncAll
+        filterMode: FilterMode = .syncAll,
+        skipPatterns: String = ""
     ) {
         self.id = id
         self.kind = kind
@@ -110,6 +118,31 @@ struct Provider: Identifiable, Codable, Sendable, Hashable {
         self.includeArchived = includeArchived
         self.localPath = localPath
         self.filterMode = filterMode
+        self.skipPatterns = skipPatterns
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, name, enabled, host, scope, bitbucketUser
+        case includeArchived, localPath, filterMode, skipPatterns
+    }
+
+    // Custom decode so providers persisted before `skipPatterns` existed still
+    // load (synthesized Codable would reject the missing key). Everything else
+    // is required — those keys have always been written. `encode` stays
+    // synthesized (writes all keys including skipPatterns).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(UUID.self, forKey: .id)
+        kind            = try c.decode(ProviderKind.self, forKey: .kind)
+        name            = try c.decode(String.self, forKey: .name)
+        enabled         = try c.decode(Bool.self, forKey: .enabled)
+        host            = try c.decode(String.self, forKey: .host)
+        scope           = try c.decode(String.self, forKey: .scope)
+        bitbucketUser   = try c.decode(String.self, forKey: .bitbucketUser)
+        includeArchived = try c.decode(Bool.self, forKey: .includeArchived)
+        localPath       = try c.decode(String.self, forKey: .localPath)
+        filterMode      = try c.decode(FilterMode.self, forKey: .filterMode)
+        skipPatterns    = try c.decodeIfPresent(String.self, forKey: .skipPatterns) ?? ""
     }
 
     // "Configured enough to attempt discovery." Per-kind required field.

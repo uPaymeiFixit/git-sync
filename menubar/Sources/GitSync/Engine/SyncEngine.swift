@@ -172,6 +172,7 @@ actor SyncEngine {
         let destRoot: URL               // where this provider's repos clone
         let filterMode: FilterMode
         let trackedSet: Set<String>     // provider-local rels, when trackedOnly
+        let skip: SkipMatcher           // per-provider skip patterns
     }
 
     // Build the run units. Native path: one per enabled ResolvedProvider.
@@ -202,7 +203,8 @@ actor SyncEngine {
                 }
                 return RunUnit(providerID: p.id.uuidString, kind: kind, title: p.name,
                                client: client, destRoot: root, filterMode: p.filterMode,
-                               trackedSet: Set(rp.trackedRels))
+                               trackedSet: Set(rp.trackedRels),
+                               skip: SkipMatcher(p.skipPatterns))
             }
         }
         // Legacy fallback.
@@ -213,7 +215,8 @@ actor SyncEngine {
                     client: makeClient(kind),
                     destRoot: syncRoot.appendingPathComponent(platformDir(kind)),
                     filterMode: filterMode(kind),
-                    trackedSet: filterMode(kind) == .trackedOnly ? trackedSet(kind) : [])
+                    trackedSet: filterMode(kind) == .trackedOnly ? trackedSet(kind) : [],
+                    skip: skip)   // legacy fallback: the global GIT_SYNC_SKIP
         }
     }
 
@@ -333,7 +336,7 @@ actor SyncEngine {
                 }
             }
             await sink.emit(.phase(label: "Discovering \(unit.title)…"))
-            let result = unit.client.discoverAll(skip: skip)
+            let result = unit.client.discoverAll(skip: unit.skip)
             complete[key(unit)] = (result.fatalError == nil)
             if let fatal = result.fatalError {
                 await sink.logLine("discovery failed: \(fatal)", platform: unit.kind.rawValue)
@@ -344,7 +347,7 @@ actor SyncEngine {
                 await sink.emit(.remoteProject(providerID: unit.providerID, platform: unit.kind.rawValue,
                                                rel: repo.rel, sshURL: repo.sshURL,
                                                defaultBranch: repo.defaultBranch))
-                let isSkipped = skip.matches(repo.namespacePath)
+                let isSkipped = unit.skip.matches(repo.namespacePath)
                 let isExcluded = unit.filterMode == .trackedOnly && !isSkipped && !unit.trackedSet.contains(repo.rel)
                 jobs.append(Job(unit: unit, repo: repo, skipped: isSkipped, excluded: isExcluded))
             }
@@ -456,12 +459,15 @@ actor SyncEngine {
         // legacy layout: destRoot = syncRoot, rel kept as-is (carries the dir).
         let destRoot: URL
         let client: PlatformDiscovery
+        let unitSkip: SkipMatcher
         if !id.providerID.isEmpty, let unit = runUnits(only: nil).first(where: { $0.providerID == id.providerID }) {
             destRoot = unit.destRoot            // provider folder + bare rel
             client = unit.client
+            unitSkip = unit.skip                // this provider's own skip patterns
         } else {
             destRoot = syncRoot                 // legacy: syncRoot + prefixed rel
             client = makeClient(platform)
+            unitSkip = skip                     // legacy: global GIT_SYNC_SKIP
         }
 
         let mux = SSHMultiplexer(parallel: 1,
@@ -486,7 +492,7 @@ actor SyncEngine {
             await sink.emit(.remoteProject(providerID: id.providerID, platform: id.platform, rel: repo.rel,
                                            sshURL: repo.sshURL, defaultBranch: repo.defaultBranch))
             // honor skip even on an individual sync
-            if skip.matches(repo.namespacePath) {
+            if unitSkip.matches(repo.namespacePath) {
                 await sink.individualFinished(id, exitCode: 0)
                 return
             }
