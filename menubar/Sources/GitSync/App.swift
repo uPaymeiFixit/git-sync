@@ -65,6 +65,9 @@ struct GitSyncApp: App {
         if args.contains("--whitelist-test") {
             exit(WhitelistTest.run())
         }
+        if args.contains("--provider-validation-test") {
+            exit(ProviderValidationTest.run())
+        }
 
         // Order matters: settings + history + inventory must exist before
         // AppState so the runner picks up the user's stored settings, the

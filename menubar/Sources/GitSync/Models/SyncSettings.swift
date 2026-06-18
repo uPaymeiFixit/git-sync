@@ -9,6 +9,15 @@ struct SyncSettings: Sendable {
     var scriptsDirectory: URL
     var environment: [String: String]
 
+    // The configured providers + their resolved secrets, snapshotted at run
+    // start. The native engine iterates THIS (not the singular GITLAB_HOST /
+    // GIT_SYNC_GITHUB_ORG env vars, which can only express one provider per
+    // kind). The env dict still carries shared config (GIT_SYNC_ROOT, depth,
+    // timeout, parallel, skip) and the inherited process env (HOME etc.).
+    // Empty for the legacy Python path, which stays env-driven + single-
+    // provider-per-kind.
+    var providers: [ResolvedProvider] = []
+
     // /usr/bin/python3 is required by the deployment target (macOS 14+
     // ships Python 3.9 there). Bundling Python in the app is over-engineering
     // for v1 — if a user has a broken /usr/bin/python3, they have bigger
@@ -59,6 +68,14 @@ struct SyncSettings: Sendable {
             .standardizedFileURL
         return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
     }()
+}
+
+// A Provider plus its Keychain-resolved token + tracked set, ready to hand to
+// the engine. Sendable so it can cross the actor boundary into SyncEngine.
+struct ResolvedProvider: Sendable {
+    var provider: Provider
+    var token: String          // resolved from Keychain at snapshot time
+    var trackedRels: [String]  // tracked rels (whitelist mode), from the inventory
 }
 
 // How a platform decides which discovered repos to actually clone/sync.

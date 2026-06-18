@@ -3,6 +3,12 @@ import Foundation
 // Identity for a single remote-known or locally-cloned repository.
 // (platform, rel) is stable across runs and survives outcome state
 // changes — unlike the older Outcome.id-by-status formula.
+//
+// NOTE (provider work, in progress): the provider abstraction will move
+// identity to (providerID, provider-local rel). That change is intentionally
+// NOT yet wired — see memory `roadmap-whitelist-providers-onboarding` and the
+// `provider-model-scaffolding` note. RepoID stays (platform, rel) until the
+// inventory migration is built + verified against real data with the user.
 struct RepoID: Hashable, Codable, Sendable, CustomStringConvertible {
     let platform: String
     let rel: String
