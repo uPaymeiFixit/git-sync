@@ -34,23 +34,7 @@ cp Resources/Info.plist "${APP_BUNDLE}/Contents/Info.plist"
 # App icon — regenerate with Tools/make-icns.sh after design changes.
 cp Resources/AppIcon.icns "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 
-# Bundle the Python sync scripts under Resources/scripts so the app is
-# self-contained — users don't need to clone the repo to run syncs.
-# Live-editing for development: rebuild with ./build.sh after script edits.
-echo "» bundle scripts/"
-cp -R ../scripts "${APP_BUNDLE}/Contents/Resources/scripts"
-# Belt-and-suspenders: strip __pycache__ to keep the bundle small.
-find "${APP_BUNDLE}/Contents/Resources/scripts" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-
-# Bundle the glab CLI so users don't need to install it separately. The
-# Python scripts hardcode `glab` as the executable, so SyncRunner prepends
-# this directory to the child PATH and glab resolves to the bundled copy.
-# Auth happens via the GITLAB_TOKEN env var (Settings → Platforms) or a
-# pre-existing user-installed glab config, whichever the user prefers.
-echo "» bundle glab"
-mkdir -p "${APP_BUNDLE}/Contents/Resources/bin"
-cp Vendor/glab "${APP_BUNDLE}/Contents/Resources/bin/glab"
-chmod +x "${APP_BUNDLE}/Contents/Resources/bin/glab"
+# (The sync engine is now pure Swift — no bundled Python scripts or glab CLI.)
 
 # Codesign with a STABLE identity. macOS keychain items remember which signing
 # identity may read them; an ad-hoc signature (codesign --sign -) has no stable

@@ -1,11 +1,11 @@
 import Foundation
 
-// EventBuffer sits between SyncRunner (the event producer) and AppState
-// (the event consumer). It exists because hopping to MainActor for every
-// event during a large run (1000+ repos, many concurrent workers) caused
-// Python's stdout pipe to back up and eventually wedge the entire sync.
+// EventBuffer sits between the engine's BufferSink (the event producer) and
+// AppState (the event consumer). It exists because hopping to MainActor for
+// every event during a large run (1000+ repos, many concurrent workers) would
+// back up the emit path and stutter the UI.
 //
-// Producer: SyncRunner's pipe reader. push() never blocks on the UI; it
+// Producer: the engine via BufferSink. push() never blocks on the UI; it
 // only touches the buffer's actor.
 // Consumer: AppState. drainAndClear() runs on a Timer at ~10Hz from the
 // MainActor and applies a batch in one render cycle.

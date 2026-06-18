@@ -29,18 +29,8 @@ struct GitSyncApp: App {
         if args.contains("--load-test") {
             exit(LoadTest.run())
         }
-        if args.contains("--pipe-stress-test") {
-            exit(PipeStressTest.run())
-        }
         if args.contains("--trash-test") {
             exit(TrashTest.run())
-        }
-        if args.contains("--concurrency-test") {
-            exit(ConcurrencyTest.run())
-        }
-        if let i = args.firstIndex(of: "--diff-engine") {
-            let dir = args.index(after: i) < args.endIndex ? args[args.index(after: i)] : ""
-            exit(DiffEngineMode.run(dir: dir))
         }
         if args.contains("--engine-sync") {
             exit(EngineSyncMode.run(args: Array(args)))
@@ -74,7 +64,7 @@ struct GitSyncApp: App {
         }
 
         // Order matters: settings + history + inventory must exist before
-        // AppState so the runner picks up the user's stored settings, the
+        // AppState so the engine picks up the user's stored settings, the
         // history store can record completed runs, and the inventory store
         // can absorb remote_project + outcome events as they stream in.
         let settingsStore = SettingsStore()

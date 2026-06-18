@@ -221,51 +221,26 @@ final class SettingsStore: ObservableObject {
         self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""
     }
 
-    // Build the SyncSettings value that SyncRunner consumes. Scripts
-    // directory + Python interpreter are app-bundle-relative and not
-    // user-controllable.
+    // Build the SyncSettings the engine consumes: the shared run config in the
+    // environment dict, with per-provider connection/credentials attached later
+    // by AppState.withTrackingEnv (which alone has the provider + inventory
+    // stores). The singular GITLAB_HOST / token / skip env vars the Python used
+    // are gone — that config now lives on each Provider.
     var currentSyncSettings: SyncSettings {
         // Start from the inherited process environment, then overlay our
-        // GIT_SYNC_* config. Process.environment REPLACES the child's env
-        // wholesale, so if we built this dict from scratch the git children
-        // would run with NO HOME / PATH / XDG_CONFIG_HOME. The visible symptom
-        // was repos that have a .DS_Store showing as "dirty": without HOME,
-        // git can't find ~/.config/git/ignore (which ignores .DS_Store), so it
-        // reports the file as untracked. The same stripping would also break
-        // git's credential helpers, hooks, and user ssh config — inherit the
-        // real environment so git behaves exactly as it does in a shell.
+        // GIT_SYNC_* config. The git children inherit this env wholesale, so it
+        // must carry HOME / PATH / XDG_CONFIG_HOME — without HOME, git can't
+        // find ~/.config/git/ignore (which ignores .DS_Store) and clean repos
+        // show as "dirty"; credential helpers, hooks, and ssh config break too.
         var env = ProcessInfo.processInfo.environment
-        // The Settings UI is authoritative: explicitly set keys when the
-        // setting is present and REMOVE them when it isn't, so a GIT_SYNC_*
-        // var inherited from the launching shell (e.g. a sourced .envrc) can't
-        // silently override the UI. set(_:_:) writes or clears accordingly.
         func set(_ key: String, _ value: String?) {
             if let value, !value.isEmpty { env[key] = value } else { env[key] = nil }
         }
         set("GIT_SYNC_ROOT", syncRoot)
-        set("GITLAB_HOST", gitlabHost)
-        set("GIT_SYNC_GITHUB_ORG", githubOrg)
-        set("GIT_SYNC_BITBUCKET_WORKSPACE", bitbucketWorkspace)
-        set("GIT_SYNC_BITBUCKET_USER", bitbucketUser)
-        set("GIT_SYNC_BITBUCKET_APP_PASSWORD", bitbucketAppPassword)
-        set("GIT_SYNC_GITHUB_TOKEN", githubToken)
-        // glab reads GITLAB_TOKEN from env when no glab-cli config exists, so
-        // passing this through lets the bundled glab authenticate without the
-        // user running `glab auth login`.
-        set("GITLAB_TOKEN", gitlabToken)
-        set("GIT_SYNC_SKIP", skipPatterns)
-        set("GIT_SYNC_SKIP_BITBUCKET", skipBitbucket ? "1" : nil)
-        set("GIT_SYNC_SKIP_GITLAB", skipGitlab ? "1" : nil)
-        set("GIT_SYNC_SKIP_GITHUB", skipGithub ? "1" : nil)
-        set("GIT_SYNC_INCLUDE_ARCHIVED", includeArchived ? "1" : nil)
         env["GIT_SYNC_PARALLEL"] = String(parallel)
         env["GIT_SYNC_TIMEOUT"] = String(timeout)
         env["GIT_SYNC_DEPTH"] = String(depth)
-        return SyncSettings(
-            pythonPath: SyncSettings.bundledPythonPath,
-            scriptsDirectory: SyncSettings.bundledScriptsDirectory,
-            environment: env
-        )
+        return SyncSettings(environment: env)
     }
 }
 

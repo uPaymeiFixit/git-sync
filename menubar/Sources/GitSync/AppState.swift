@@ -28,21 +28,12 @@ final class AppState: ObservableObject {
     // stays alive while ANY job is active and stops only when all are done —
     // the first individual to finish must not stop the timer for the others.
     private var drainRetain = 0
-    private(set) lazy var runner: SyncRunner = SyncRunner(
-        settings: settingsStore.currentSyncSettings,
-        eventBuffer: eventBuffer
-    )
-    // Native Swift sync engine — replaces the Python+pipe. Feeds the SAME
-    // EventBuffer via BufferSink, so the drain timer / two-lane / finalize
-    // logic below is unchanged. The engine is the default; set
-    // GIT_SYNC_USE_PYTHON=1 in the environment to fall back to the legacy
-    // SyncRunner during the transition.
+    // The native Swift sync engine. Feeds an EventBuffer via BufferSink, which
+    // the 10Hz drain timer / two-lane / finalize logic below consumes.
     private(set) lazy var engine: SyncEngine = SyncEngine(
         settings: settingsStore.currentSyncSettings,
         sink: BufferSink(buffer: eventBuffer)
     )
-    private let useNativeEngine =
-        ProcessInfo.processInfo.environment["GIT_SYNC_USE_PYTHON"] != "1"
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
 
     init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore, providers: ProviderStore) {
@@ -93,11 +84,10 @@ final class AppState: ObservableObject {
 
     // `only` scopes the run to a subset of platforms (the scheduler passes the
     // platforms that are actually overdue). nil = all enabled platforms (the
-    // manual "Run now" button and any full catch-up). The legacy SyncRunner
-    // path doesn't support scoping, so it always runs everything there.
+    // manual "Run now" button and any full catch-up).
     func startRun(only: Set<Platform>? = nil) {
         // Full run is exclusive: refuse if a full run OR any individual sync
-        // is already in flight (rule 1). The runner enforces this again as
+        // is already in flight (rule 1). The engine enforces this again as
         // the authoritative gate; this is the UI-side mirror.
         guard currentRun == nil, syncingRepos.isEmpty else { return }
         currentRun = RunRecord()
@@ -105,29 +95,19 @@ final class AppState: ObservableObject {
         activeWorkers = [:]
         retainDrainTimer()
         let snapshot = withTrackingEnv(settingsStore.currentSyncSettings)
-        if useNativeEngine {
-            Task {
-                await engine.updateSettings(snapshot)
-                await engine.startFullRun(only: only)
-            }
-        } else {
-            Task {
-                await runner.updateSettings(snapshot)
-                await runner.startRun()
-            }
+        Task {
+            await engine.updateSettings(snapshot)
+            await engine.startFullRun(only: only)
         }
     }
 
     // Build the run snapshot: attach the resolved provider list (each provider
-    // + its Keychain token + tracked rels) for the native engine to iterate,
-    // AND keep the per-platform whitelist env vars for the legacy Python path.
-    // The filter mode + token live in the provider/settings stores while the
+    // + its Keychain token + tracked rels) for the engine to iterate. The
+    // filter mode + token live in the provider/settings stores while the
     // tracked set lives in the inventory, so AppState (which has all three) is
     // the only place that can assemble this.
     private func withTrackingEnv(_ settings: SyncSettings) -> SyncSettings {
         var s = settings
-
-        // Native engine: the resolved provider list.
         s.providers = providers.enabledProviders.map { p in
             ResolvedProvider(
                 provider: p,
@@ -135,26 +115,11 @@ final class AppState: ObservableObject {
                 trackedRels: p.filterMode == .trackedOnly
                     ? inventory.trackedRels(providerID: p.id.uuidString) : [])
         }
-
-        // Legacy Python path: per-platform whitelist env (single provider/kind).
-        for platform in Platform.allCases {
-            let key = platform.rawValue
-            let mode = settingsStore.filterMode(platform: key)
-            s.environment["GIT_SYNC_FILTER_MODE_\(key.uppercased())"] = mode.rawValue
-            if mode == .trackedOnly {
-                let rels = inventory.trackedRels(platform: key)
-                s.environment["GIT_SYNC_TRACKED_\(key.uppercased())"] = rels.joined(separator: "\n")
-            }
-        }
         return s
     }
 
     func cancelRun() {
-        if useNativeEngine {
-            Task { await engine.cancel() }
-        } else {
-            Task { await runner.cancel() }
-        }
+        Task { await engine.cancel() }
     }
 
     // Move the local clones of the given repos to the Trash, after the
@@ -267,26 +232,21 @@ final class AppState: ObservableObject {
         guard Platform(rawValue: id.platform) != nil else { return }
         // Mark busy synchronously (before the await) so the row spins on the
         // very next render and a second click is rejected immediately. The
-        // runner pushes an individual-finish on every early-return path, so
+        // engine pushes an individual-finish on every early-return path, so
         // this always drains back out — no stuck spinner.
         syncingRepos.insert(id)
         retainDrainTimer()
-        let snapshot = settingsStore.currentSyncSettings
-        if useNativeEngine {
-            // Pass known ssh/branch from the inventory so the engine can skip
-            // even the single discoverOne API call when we already have them.
-            let repo = inventory.repos[id]
-            let ssh = repo?.sshURL
-            let branch = repo?.defaultBranch
-            Task {
-                await engine.updateSettings(snapshot)
-                await engine.syncRepo(id, sshURL: ssh, branch: branch)
-            }
-        } else {
-            Task {
-                await runner.updateSettings(snapshot)
-                await runner.runIndividual(id: id, extraArgs: ["--only", id.rel])
-            }
+        // Attach the resolved provider list so the engine can match this repo's
+        // providerID to its folder/token (syncRepo resolves the unit by ID).
+        let snapshot = withTrackingEnv(settingsStore.currentSyncSettings)
+        // Pass known ssh/branch from the inventory so the engine can skip
+        // even the single discoverOne API call when we already have them.
+        let repo = inventory.repos[id]
+        let ssh = repo?.sshURL
+        let branch = repo?.defaultBranch
+        Task {
+            await engine.updateSettings(snapshot)
+            await engine.syncRepo(id, sshURL: ssh, branch: branch)
         }
     }
 
@@ -294,9 +254,9 @@ final class AppState: ObservableObject {
     //
     // Polls the EventBuffer at ~10Hz on the main actor and applies any
     // pending events in a single render cycle. This is the choke point
-    // we deliberately introduce so the SyncRunner's pipe reader never
-    // blocks on UI work — if the UI can't keep up, events coalesce in
-    // the buffer rather than backing up in the Python's stdout pipe.
+    // we deliberately introduce so the engine's BufferSink never blocks on
+    // UI work — if the UI can't keep up, events coalesce in the buffer
+    // rather than backing up in the engine's emit path.
 
     // Ref-counted so a full run and N individual syncs share ONE timer.
     // Retain when a job starts, release when it finishes; the timer lives

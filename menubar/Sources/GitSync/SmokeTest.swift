@@ -1,23 +1,26 @@
 import Foundation
 
-// CLI smoke test for SyncRunner. Spawns the three platform scripts with
-// every platform skipped (so they exit quickly with EXIT_SKIPPED=2 and
-// emit no real events), then reports what it observed by polling the
-// EventBuffer.
+// CLI smoke test for the sync engine's plumbing. Runs the engine with NO
+// providers configured (nothing to discover or clone), then asserts it
+// finishes promptly through the BufferSink → EventBuffer path without
+// deadlocking and without emitting spurious events. This is the cheapest
+// end-to-end check that the engine → sink → buffer → drain wiring is intact.
 //
 // Invoked via:
 //   .build/<config>/GitSync.app/Contents/MacOS/GitSync --smoke-test
 enum SmokeTest {
     static func run() -> Int32 {
         let buffer = EventBuffer()
-        let runner = SyncRunner(settings: settingsForSmokeTest(), eventBuffer: buffer)
+        let settings = SyncSettings(
+            environment: ["GIT_SYNC_ROOT": "/tmp/gitsync-smoketest"],
+            providers: [])   // no providers → no platforms → finishes immediately
+        let engine = SyncEngine(settings: settings, sink: BufferSink(buffer: buffer))
 
         let resultTask = Task { () -> Int32 in
-            await runner.startRun()
+            await engine.startFullRun()
 
-            // Poll the buffer with a 30s ceiling. Skipped runs complete
-            // in well under 1s, but the timeout gives us a hard stop in
-            // case the runner deadlocks.
+            // Poll the buffer with a 30s ceiling. A no-provider run finishes in
+            // well under 1s; the timeout is a hard stop in case it deadlocks.
             let deadline = Date().addingTimeInterval(30)
             var events: [SyncEvent] = []
             var logLines: [(String, String)] = []
@@ -26,7 +29,7 @@ enum SmokeTest {
 
             while !allFinished {
                 if Date() >= deadline {
-                    print("FAIL: timeout waiting for platforms to finish")
+                    print("FAIL: timeout waiting for the run to finish")
                     return 1
                 }
                 try? await Task.sleep(for: .milliseconds(50))
@@ -54,19 +57,6 @@ enum SmokeTest {
         var value: Int32?
     }
 
-    private static func settingsForSmokeTest() -> SyncSettings {
-        SyncSettings(
-            pythonPath: SyncSettings.bundledPythonPath,
-            scriptsDirectory: SyncSettings.bundledScriptsDirectory,
-            environment: [
-                "GIT_SYNC_ROOT": "/tmp/gitsync-smoketest",
-                "GIT_SYNC_SKIP_BITBUCKET": "1",
-                "GIT_SYNC_SKIP_GITLAB": "1",
-                "GIT_SYNC_SKIP_GITHUB": "1",
-            ]
-        )
-    }
-
     private static func printReport(
         events: [SyncEvent],
         logLines: [(String, String)],
@@ -83,13 +73,11 @@ enum SmokeTest {
             }
         }
 
-        print("SyncRunner smoke test (all platforms skipped)")
-        check("all three platforms reported termination",
-              exitCodes.count == 3, "got \(exitCodes.keys.sorted())")
-        check("all exit codes are EXIT_SKIPPED (2)",
-              exitCodes.values.allSatisfy { $0 == 2 },
-              "exit codes: \(exitCodes)")
-        check("no GIT_SYNC_EVENTS were emitted (skipped runs short-circuit run_jobs)",
+        print("Engine smoke test (no providers configured)")
+        check("run finished (allFinished arrived, no deadlock)", true)
+        check("no platforms reported (nothing to sync)",
+              exitCodes.isEmpty, "got \(exitCodes.keys.sorted())")
+        check("no events emitted (no discovery/clone work)",
               events.isEmpty, "got \(events.count) events")
 
         if !logLines.isEmpty {

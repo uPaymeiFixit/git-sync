@@ -48,15 +48,16 @@ enum AbortResetTest {
         env["GIT_SYNC_ROOT"] = root.path
         env["GIT_SYNC_DEPTH"] = "0"
         env["GIT_SYNC_NO_SSH_MUX"] = "1"   // local file remote, no ssh
-        let settings = SyncSettings(pythonPath: "/usr/bin/python3",
-                                    scriptsDirectory: SyncSettings.bundledScriptsDirectory,
-                                    environment: env)
+        // A real provider whose folder is root/Gitlab, so the bare rel "repo"
+        // resolves to the on-disk clone at root/Gitlab/repo.
+        let provider = Provider(kind: .gitlab, name: "GitLab", host: "gitlab.example",
+                                localPath: platformDir.path)
+        let resolved = ResolvedProvider(provider: provider, token: "x", trackedRels: [])
+        let settings = SyncSettings(environment: env, providers: [resolved])
         let sink = CapturingSink()
         let engine = SyncEngine(settings: settings, sink: sink)
-        // Legacy row (no providerID): the engine's legacy fallback resolves
-        // destRoot = syncRoot and joins the prefixed rel, so "Gitlab/repo" finds
-        // the on-disk clone at root/Gitlab/repo and reports up-to-date.
-        let id = RepoID(platform: "gitlab", rel: "Gitlab/repo")
+        // Individual sync resolves the unit by providerID, so it must match.
+        let id = RepoID(providerID: provider.id.uuidString, platform: "gitlab", rel: "repo")
 
         var failures = 0
         func check(_ label: String, _ ok: Bool, _ detail: String = "") {

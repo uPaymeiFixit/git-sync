@@ -1,11 +1,10 @@
 import Foundation
 import Synchronization
 
-// The native sync engine — replaces SyncRunner. Drives git directly (no
-// Python, no subprocess pipe). Owns:
+// The sync engine. Drives git directly in Swift (no Python, no subprocess
+// pipe). Owns:
 //   - the two-lane mutual-exclusion gate (full run exclusive; individual
-//     per-repo syncs run in parallel with each other), identical rules to
-//     the SyncRunner two-lane model it replaces
+//     per-repo syncs run in parallel with each other)
 //   - discovery via the PlatformDiscovery clients
 //   - fan-out across repos via a bounded TaskGroup (concurrency cap =
 //     GIT_SYNC_PARALLEL), wrapped in SSH ControlMaster prewarm/cleanup
@@ -31,8 +30,8 @@ actor SyncEngine {
     private let sink: EngineSink
     private var settings: SyncSettings
 
-    // Two-lane state, mirroring SyncRunner: a full run is exclusive; any
-    // number of individual per-repo syncs run in parallel.
+    // Two-lane state: a full run is exclusive; any number of individual
+    // per-repo syncs run in parallel.
     private var fullRunActive = false
     private var individualRepos = Set<RepoID>()
     private var fullRunTask: Task<Void, Never>?
@@ -58,17 +57,6 @@ actor SyncEngine {
     private var depth: Int { Int(env["GIT_SYNC_DEPTH"] ?? "100") ?? 100 }
     private var timeout: TimeInterval { TimeInterval(Int(env["GIT_SYNC_TIMEOUT"] ?? "1800") ?? 1800) }
     private var parallel: Int { Int(env["GIT_SYNC_PARALLEL"] ?? "128") ?? 128 }
-    private var skip: SkipMatcher { SkipMatcher(env["GIT_SYNC_SKIP"] ?? "") }
-
-    // Per-platform whitelist config (set by AppState.withTrackingEnv).
-    private func filterMode(_ p: Platform) -> FilterMode {
-        FilterMode(rawValue: env["GIT_SYNC_FILTER_MODE_\(p.rawValue.uppercased())"] ?? "") ?? .syncAll
-    }
-    // The tracked canonical rels for a platform, as a set for O(1) membership.
-    private func trackedSet(_ p: Platform) -> Set<String> {
-        let raw = env["GIT_SYNC_TRACKED_\(p.rawValue.uppercased())"] ?? ""
-        return Set(raw.split(separator: "\n").map(String.init))
-    }
 
     // ---- Full run: enabled platforms, exclusive ----
     // listOnly = discover + emit remote_project events, then stop without
@@ -130,37 +118,6 @@ actor SyncEngine {
         fullRunTask = nil
     }
 
-    private func enabledPlatforms() -> [Platform] {
-        var out: [Platform] = []
-        if env["GIT_SYNC_SKIP_GITLAB"] == nil, env["GITLAB_HOST"] != nil { out.append(.gitlab) }
-        if env["GIT_SYNC_SKIP_GITHUB"] == nil, env["GIT_SYNC_GITHUB_ORG"] != nil { out.append(.github) }
-        if env["GIT_SYNC_SKIP_BITBUCKET"] == nil, env["GIT_SYNC_BITBUCKET_WORKSPACE"] != nil { out.append(.bitbucket) }
-        return out
-    }
-
-    private func makeClient(_ platform: Platform) -> PlatformDiscovery {
-        switch platform {
-        case .gitlab:
-            return GitLabClient(
-                host: env["GITLAB_HOST"] ?? "",
-                token: env["GITLAB_TOKEN"] ?? "",
-                includeArchived: env["GIT_SYNC_INCLUDE_ARCHIVED"] != nil,
-                syncRoot: syncRoot)
-        case .github:
-            return GitHubClient(
-                org: env["GIT_SYNC_GITHUB_ORG"] ?? "",
-                token: env["GIT_SYNC_GITHUB_TOKEN"] ?? "",
-                includeArchived: env["GIT_SYNC_INCLUDE_ARCHIVED"] != nil,
-                syncRoot: syncRoot)
-        case .bitbucket:
-            return BitbucketClient(
-                workspace: env["GIT_SYNC_BITBUCKET_WORKSPACE"] ?? "",
-                user: env["GIT_SYNC_BITBUCKET_USER"] ?? "",
-                appPassword: env["GIT_SYNC_BITBUCKET_APP_PASSWORD"] ?? "",
-                syncRoot: syncRoot)
-        }
-    }
-
     // One provider's per-run context. Everything downstream (discovery,
     // filtering, fan-out, stale-scan) keys off this so the run loop is
     // provider-uniform — no special-casing per platform.
@@ -175,48 +132,33 @@ actor SyncEngine {
         let skip: SkipMatcher           // per-provider skip patterns
     }
 
-    // Build the run units. Native path: one per enabled ResolvedProvider.
-    // Legacy path (no providers in the snapshot — Python fallback or pre-
-    // population): synthesize from the env-driven enabledPlatforms() so behavior
-    // is unchanged.
+    // Build the run units — one per enabled ResolvedProvider. Each provider is
+    // an independent sync source (host/scope/token/folder/filter/skip).
     private func runUnits(only: Set<Platform>?) -> [RunUnit] {
-        if !providersSnapshot.isEmpty {
-            return providersSnapshot.compactMap { rp -> RunUnit? in
-                let p = rp.provider
-                let kind = Platform(rawValue: p.kind.rawValue) ?? .gitlab
-                if let only, !only.contains(kind) { return nil }
-                let root = URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)
-                let client: PlatformDiscovery
-                switch p.kind {
-                case .gitlab:
-                    client = GitLabClient(host: p.host, token: rp.token,
-                                          includeArchived: p.includeArchived,
-                                          syncRoot: syncRoot, localRoot: root)
-                case .github:
-                    client = GitHubClient(org: p.scope, token: rp.token,
-                                          includeArchived: p.includeArchived,
-                                          syncRoot: syncRoot, localRoot: root)
-                case .bitbucket:
-                    client = BitbucketClient(workspace: p.scope, user: p.bitbucketUser,
-                                             appPassword: rp.token,
-                                             syncRoot: syncRoot, localRoot: root)
-                }
-                return RunUnit(providerID: p.id.uuidString, kind: kind, title: p.name,
-                               client: client, destRoot: root, filterMode: p.filterMode,
-                               trackedSet: Set(rp.trackedRels),
-                               skip: SkipMatcher(p.skipPatterns))
+        providersSnapshot.compactMap { rp -> RunUnit? in
+            let p = rp.provider
+            let kind = Platform(rawValue: p.kind.rawValue) ?? .gitlab
+            if let only, !only.contains(kind) { return nil }
+            let root = URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)
+            let client: PlatformDiscovery
+            switch p.kind {
+            case .gitlab:
+                client = GitLabClient(host: p.host, token: rp.token,
+                                      includeArchived: p.includeArchived,
+                                      syncRoot: syncRoot, localRoot: root)
+            case .github:
+                client = GitHubClient(org: p.scope, token: rp.token,
+                                      includeArchived: p.includeArchived,
+                                      syncRoot: syncRoot, localRoot: root)
+            case .bitbucket:
+                client = BitbucketClient(workspace: p.scope, user: p.bitbucketUser,
+                                         appPassword: rp.token,
+                                         syncRoot: syncRoot, localRoot: root)
             }
-        }
-        // Legacy fallback.
-        var platforms = enabledPlatforms()
-        if let only { platforms = platforms.filter { only.contains($0) } }
-        return platforms.map { kind in
-            RunUnit(providerID: "", kind: kind, title: kind.titleName,
-                    client: makeClient(kind),
-                    destRoot: syncRoot.appendingPathComponent(platformDir(kind)),
-                    filterMode: filterMode(kind),
-                    trackedSet: filterMode(kind) == .trackedOnly ? trackedSet(kind) : [],
-                    skip: skip)   // legacy fallback: the global GIT_SYNC_SKIP
+            return RunUnit(providerID: p.id.uuidString, kind: kind, title: p.name,
+                           client: client, destRoot: root, filterMode: p.filterMode,
+                           trackedSet: Set(rp.trackedRels),
+                           skip: SkipMatcher(p.skipPatterns))
         }
     }
 
@@ -447,28 +389,25 @@ actor SyncEngine {
 
     private func runIndividual(id: RepoID, knownSSH: String?, knownBranch: String?) async {
         defer { Task { await self.clearIndividual(id) } }
-        guard let platform = Platform(rawValue: id.platform) else {
+        guard Platform(rawValue: id.platform) != nil else {
             await sink.individualFinished(id, exitCode: -1)
             return
         }
-        // Resolve the provider this repo belongs to (its client + dest folder).
-        // Match by EXACT providerID. For a legacy/unmatched row (providerID "")
-        // we must NOT borrow a real provider's folder — that would clone to
-        // providerRoot/<prefixed-rel>, diverging from AppState.diskPath(for:)'s
-        // legacy branch (syncRoot + rel) used by reveal/delete. Instead use the
-        // legacy layout: destRoot = syncRoot, rel kept as-is (carries the dir).
-        let destRoot: URL
-        let client: PlatformDiscovery
-        let unitSkip: SkipMatcher
-        if !id.providerID.isEmpty, let unit = runUnits(only: nil).first(where: { $0.providerID == id.providerID }) {
-            destRoot = unit.destRoot            // provider folder + bare rel
-            client = unit.client
-            unitSkip = unit.skip                // this provider's own skip patterns
-        } else {
-            destRoot = syncRoot                 // legacy: syncRoot + prefixed rel
-            client = makeClient(platform)
-            unitSkip = skip                     // legacy: global GIT_SYNC_SKIP
+        // Resolve the provider this repo belongs to (its client + dest folder),
+        // matching by EXACT providerID. If the row has no matching configured
+        // provider (empty/stale providerID — e.g. a deleted provider, or a row
+        // from before the provider model), we have no host/token to sync it, so
+        // fail cleanly rather than guessing a folder or credentials.
+        guard !id.providerID.isEmpty,
+              let unit = runUnits(only: nil).first(where: { $0.providerID == id.providerID }) else {
+            await sink.logLine("\(id.rel): no configured provider for this repo — skipping",
+                               platform: id.platform)
+            await sink.individualFinished(id, exitCode: 1)
+            return
         }
+        let destRoot = unit.destRoot            // provider folder + bare rel
+        let client = unit.client
+        let unitSkip = unit.skip                // this provider's own skip patterns
 
         let mux = SSHMultiplexer(parallel: 1,
                                  pid: ProcessInfo.processInfo.processIdentifier,
@@ -544,15 +483,6 @@ actor SyncEngine {
     // The abort flag, readable from the nonisolated worker without hopping
     // onto the actor.
     let abortBox = AbortBox()
-
-    private func platformDir(_ p: Platform) -> String {
-        switch p { case .gitlab: return "Gitlab"; case .github: return "Github"; case .bitbucket: return "Bitbucket" }
-    }
-    private func rel(_ dest: URL) -> String {
-        let root = syncRoot.standardizedFileURL.path
-        let d = dest.standardizedFileURL.path
-        return d.hasPrefix(root + "/") ? String(d.dropFirst(root.count + 1)) : d
-    }
 }
 
 // Thread-safe abort flag readable from the @Sendable progress/abort closures
