@@ -57,14 +57,24 @@ enum RepoTrasher {
         let rootPaths = allowedRoots.map { $0.standardizedFileURL.path }
 
         for id in ids {
+            // Reject an empty/whitespace rel up front: it resolves to a
+            // provider's ROOT folder, and trashing that would wipe every repo
+            // under the provider in one click. A repo must have a real path.
+            guard !id.rel.trimmingCharacters(in: .whitespaces).isEmpty else {
+                report.skipped.append((id, "empty path"))
+                continue
+            }
             guard let target = resolve(id)?.standardizedFileURL else {
                 report.skipped.append((id, "no provider folder for this repo"))
                 continue
             }
 
-            // Defense in depth: the target must live under one of the
-            // configured provider folders, even if a malformed rel sneaks in.
-            guard rootPaths.contains(where: { target.path.hasPrefix($0 + "/") }) else {
+            // Defense in depth: the target must live STRICTLY UNDER one of the
+            // configured provider folders — never equal to a root (that's the
+            // whole-folder-wipe case) and never escaping via "..".
+            let tp = target.path
+            guard !rootPaths.contains(tp),
+                  rootPaths.contains(where: { tp.hasPrefix($0 + "/") }) else {
                 report.skipped.append((id, "path escapes provider folder"))
                 continue
             }

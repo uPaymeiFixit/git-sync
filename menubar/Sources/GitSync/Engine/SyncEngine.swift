@@ -449,12 +449,20 @@ actor SyncEngine {
             return
         }
         // Resolve the provider this repo belongs to (its client + dest folder).
-        // Falls back to the legacy syncRoot/<Dir> when there's no provider match
-        // (e.g. providerID "" on the Python path).
-        let unit = runUnits(only: nil).first { $0.providerID == id.providerID }
-            ?? runUnits(only: [platform]).first
-        let destRoot = unit?.destRoot ?? syncRoot.appendingPathComponent(platformDir(platform))
-        let client = unit?.client ?? makeClient(platform)
+        // Match by EXACT providerID. For a legacy/unmatched row (providerID "")
+        // we must NOT borrow a real provider's folder — that would clone to
+        // providerRoot/<prefixed-rel>, diverging from AppState.diskPath(for:)'s
+        // legacy branch (syncRoot + rel) used by reveal/delete. Instead use the
+        // legacy layout: destRoot = syncRoot, rel kept as-is (carries the dir).
+        let destRoot: URL
+        let client: PlatformDiscovery
+        if !id.providerID.isEmpty, let unit = runUnits(only: nil).first(where: { $0.providerID == id.providerID }) {
+            destRoot = unit.destRoot            // provider folder + bare rel
+            client = unit.client
+        } else {
+            destRoot = syncRoot                 // legacy: syncRoot + prefixed rel
+            client = makeClient(platform)
+        }
 
         let mux = SSHMultiplexer(parallel: 1,
                                  pid: ProcessInfo.processInfo.processIdentifier,
@@ -466,7 +474,9 @@ actor SyncEngine {
         var sshURL = knownSSH ?? ""
         var branch = knownBranch ?? ""
         if sshURL.isEmpty || branch.isEmpty {
-            guard let repo = client.discoverOne(rel: id.rel) else {
+            // Pass the BARE namespace path: provider rels are already bare;
+            // namespacePath strips a legacy "Gitlab/" prefix if present.
+            guard let repo = client.discoverOne(rel: id.namespacePath) else {
                 await sink.logLine("--only \(id.rel): not found in remote listing", platform: id.platform)
                 await sink.individualFinished(id, exitCode: 1)
                 return

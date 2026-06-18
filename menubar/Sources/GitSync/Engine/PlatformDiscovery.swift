@@ -147,9 +147,9 @@ struct GitLabClient: PlatformDiscovery {
     }
 
     func discoverOne(rel target: String) -> DiscoveredRepo? {
-        // Strip the "Gitlab/" prefix, URL-encode the namespace path (slashes
-        // become %2F) for GET /projects/:url-encoded-path.
-        let ns = target.contains("/") ? String(target.drop(while: { $0 != "/" }).dropFirst()) : target
+        // `target` is the bare namespace path (caller passes RepoID.namespacePath).
+        // URL-encode it (slashes become %2F) for GET /projects/:url-encoded-path.
+        let ns = target
         guard let enc = ns.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
               let url = URL(string: "\(apiBase)/projects/\(enc)") else { return nil }
         guard let resp = try? HTTPClient.get(url, headers: headers, accept: accept),
@@ -292,7 +292,7 @@ struct GitHubClient: PlatformDiscovery {
     }
 
     func discoverOne(rel target: String) -> DiscoveredRepo? {
-        let name = target.contains("/") ? String(target.drop(while: { $0 != "/" }).dropFirst()) : target
+        let name = target   // bare repo name (caller passes RepoID.namespacePath)
         guard let url = URL(string: "\(api)/repos/\(org)/\(name)") else { return nil }
         guard let resp = try? HTTPClient.get(url, headers: headers, accept: accept),
               let v = try? JSONSerialization.jsonObject(with: resp.body) as? [String: Any],
@@ -374,7 +374,7 @@ struct BitbucketClient: PlatformDiscovery {
     }
 
     func discoverOne(rel target: String) -> DiscoveredRepo? {
-        let slug = target.contains("/") ? String(target.drop(while: { $0 != "/" }).dropFirst()) : target
+        let slug = target   // bare repo slug (caller passes RepoID.namespacePath)
         guard let url = URL(string:
             "\(api)/repositories/\(workspace)/\(slug)?fields=slug,mainbranch.name,links.clone") else { return nil }
         guard let resp = try? HTTPClient.get(url, headers: headers, accept: accept),

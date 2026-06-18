@@ -53,10 +53,10 @@ enum AbortResetTest {
                                     environment: env)
         let sink = CapturingSink()
         let engine = SyncEngine(settings: settings, sink: sink)
-        // Provider-local rel ("repo", not "Gitlab/repo"). With no providers
-        // configured the engine uses the legacy destRoot = syncRoot/Gitlab, so
-        // the on-disk clone at root/Gitlab/repo is found and reports up-to-date.
-        let id = RepoID(platform: "gitlab", rel: "repo")
+        // Legacy row (no providerID): the engine's legacy fallback resolves
+        // destRoot = syncRoot and joins the prefixed rel, so "Gitlab/repo" finds
+        // the on-disk clone at root/Gitlab/repo and reports up-to-date.
+        let id = RepoID(platform: "gitlab", rel: "Gitlab/repo")
 
         var failures = 0
         func check(_ label: String, _ ok: Bool, _ detail: String = "") {

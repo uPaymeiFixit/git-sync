@@ -105,6 +105,10 @@ final class ProviderStore: ObservableObject {
     private static func normalize(_ path: String) -> String {
         var p = (path as NSString).expandingTildeInPath
         p = (p as NSString).standardizingPath
+        // Resolve symlinks too, so two providers pointing at the same physical
+        // folder through a symlink are caught as a collision (best-effort:
+        // resolvingSymlinksInPath only resolves components that exist on disk).
+        p = (p as NSString).resolvingSymlinksInPath
         while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
         return p
     }

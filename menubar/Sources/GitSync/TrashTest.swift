@@ -45,13 +45,25 @@ enum TrashTest {
             RepoID(platform: "gitlab", rel: "Gitlab/unpushed-repo"),
             RepoID(platform: "gitlab", rel: "Gitlab/non-git-dir"),
             RepoID(platform: "gitlab", rel: "Gitlab/not-on-disk"),
+            // Safety: an empty rel resolves to the root folder itself — must be
+            // refused, never trash a whole provider/sync folder.
+            RepoID(platform: "gitlab", rel: ""),
+            // Safety: a rel equal to a root (no trailing component) — refused.
+            RepoID(platform: "gitlab", rel: "Gitlab"),
         ]
-        // Fixtures live at root/<rel>; resolve straight off root and allow that
-        // root (mirrors the legacy-fallback path in AppState.diskPathResolver).
+        // Fixtures live at root/Gitlab/<name>. The provider folder root/Gitlab
+        // is the allowed root (mirrors production, where allowedRoots are the
+        // provider localPaths). rel "Gitlab/clean-repo" resolves under it; the
+        // empty rel resolves to root/Gitlab itself (must be refused).
+        let providerRoot = root.appendingPathComponent("Gitlab")
         let report = await RepoTrasher.trash(
             ids: ids,
-            resolve: { root.appendingPathComponent($0.rel) },
-            allowedRoots: [root])
+            resolve: { id in
+                // bare name under the provider folder, mirroring diskPath
+                let name = id.rel.hasPrefix("Gitlab/") ? String(id.rel.dropFirst("Gitlab/".count)) : id.rel
+                return providerRoot.appendingPathComponent(name)
+            },
+            allowedRoots: [providerRoot])
 
         var failures = 0
         func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
@@ -77,6 +89,13 @@ enum TrashTest {
         check("missing repo was skipped as not on disk",
               skippedByRel["Gitlab/not-on-disk"] == "not on disk",
               "got \(skippedByRel["Gitlab/not-on-disk"] ?? "—")")
+        check("empty rel refused (never trash a whole provider folder)",
+              skippedByRel[""] == "empty path",
+              "got \(skippedByRel[""] ?? "—")")
+        check("provider folder still exists (empty rel did NOT trash it)",
+              fm.fileExists(atPath: root.appendingPathComponent("Gitlab").path))
+        check("NOT trashed: empty rel",
+              !report.trashed.contains { $0.rel.isEmpty })
         check("dirty repo still exists on disk",
               fm.fileExists(atPath: root.appendingPathComponent("Gitlab/dirty-repo").path))
         check("unpushed repo still exists on disk",
