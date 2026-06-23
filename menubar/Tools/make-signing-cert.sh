@@ -65,12 +65,24 @@ echo "» importing into login keychain (you may be asked for your login password
 security import "$TMP/identity.p12" -k "$KEYCHAIN" -P "$P12PASS" \
     -T /usr/bin/codesign -T /usr/bin/security >/dev/null
 
-# Trust the cert for code signing. This is what lets Gatekeeper + the keychain
-# treat builds signed by it as a consistent, trusted local identity.
-echo "» trusting the certificate for code signing"
-security add-trusted-cert -d -r trustRoot \
-    -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem" >/dev/null 2>&1 || \
-    echo "  (trust step needs admin; signing still works without it for local runs)"
+# Trust the cert for code signing. This is what lets the keychain treat builds
+# signed by it as a consistent, TRUSTED local identity — without it the
+# signature is stable but untrusted, so macOS still re-prompts for every secret
+# on each launch (a stable identity alone is necessary but not sufficient).
+#
+# Use the USER trust domain (no -d): it doesn't need admin and only prompts for
+# the login password once via a GUI dialog. The admin/system domain (-d) needs
+# sudo and silently no-ops without it — which is why earlier builds stayed
+# untrusted. Try user trust first; fall back to admin only if user trust fails.
+echo "» trusting the certificate for code signing (you may get one GUI password prompt)"
+if security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem" >/dev/null 2>&1; then
+    echo "  ✓ trusted in the user domain"
+elif security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem" >/dev/null 2>&1; then
+    echo "  ✓ trusted in the admin domain"
+else
+    echo "  ⚠️  could not set trust — signing still works, but you may keep getting"
+    echo "      keychain password prompts on launch. See README for the manual fix."
+fi
 
 # Allow codesign to use the key non-interactively going forward.
 security set-key-partition-list -S apple-tool:,apple: -s \

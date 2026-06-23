@@ -26,46 +26,69 @@ xattr -dr com.apple.quarantine /Applications/GitSync.app   # first launch only
 open /Applications/GitSync.app
 ```
 
-The app uses an ad-hoc code signature. For sharing with others, swap `codesign --sign -` in `build.sh` for a Developer ID Application identity and notarize the bundle.
+### Code signing & keychain prompts
+
+`build.sh` signs with a stable local identity ("GitSync Self-Signed") so the
+keychain ACL on your stored tokens matches across rebuilds — without that you'd
+re-enter your login password for every secret on each launch. Run the one-time
+setup before your first build:
+
+```
+./Tools/make-signing-cert.sh
+```
+
+This creates the identity **and** trusts it for code signing. Both matter: a
+stable signature that isn't *trusted* still triggers keychain prompts. If you
+created the cert with an older version of the script (no trust step), repair it
+without recreating the cert:
+
+```
+security find-certificate -c "GitSync Self-Signed" -p > /tmp/gitsync.pem
+security add-trusted-cert -r trustRoot -p codeSign \
+    -k "$HOME/Library/Keychains/login.keychain-db" /tmp/gitsync.pem
+```
+
+After trusting, relaunch once and click **Always Allow** a final time; prompts
+should stop. For distribution to other Macs, set `SIGN_IDENTITY` to a Developer
+ID Application identity and notarize the bundle.
 
 ## Architecture
 
 ```
 GitSync.app
 ├── AppState              — observable source of truth + event router
-├── SyncRunner            — spawns scripts/sync-{platform}.py with GIT_SYNC_EVENTS=1
-├── EventBuffer           — batches events; coalesces worker_phase
-├── EventParser           — consumes the "\x1eGSE " JSON-line protocol
-├── InventoryStore        — persistent repo state keyed by (platform, rel)
+├── SyncEngine            — pure-Swift sync engine; drives git directly (no Python)
+│   ├── PlatformDiscovery — GitLab/GitHub/Bitbucket REST clients
+│   └── RepoSyncer        — the clone_or_update decision tree
+├── BufferSink/EventBuffer— engine emits events; batched + coalesced for the UI
+├── InventoryStore        — persistent repo state keyed by (providerID, platform, rel)
+├── ProviderStore         — configured sync sources (UserDefaults) + tokens (Keychain)
 ├── HistoryStore          — per-run logs on disk
-├── SettingsStore         — UserDefaults + Keychain
+├── SettingsStore         — shared run config (UserDefaults)
 └── MenuBarExtra UI       — three icon states: idle / running / attention
 ```
 
-The app never modifies `.envrc`. Settings live in UserDefaults + Keychain (for tokens) and are passed to child processes as env vars on each run. `.envrc` remains the source of truth for command-line invocations.
+The app never modifies `.envrc`. Configuration lives in UserDefaults (providers
++ shared settings) and the Keychain (per-provider tokens); the engine runs git
+in-process with the inherited environment so git behaves as it does in a shell.
 
 ## CLI test harnesses
 
-The app's executable has four diagnostic modes:
+The app's executable has several diagnostic modes (the Command Line Tools
+toolchain ships no XCTest, so these stand in):
 
 ```
-.build/.../GitSync.app/Contents/MacOS/GitSync --verify-parser     # EventParser
-.build/.../GitSync.app/Contents/MacOS/GitSync --smoke-test        # spawn + skip
-.build/.../GitSync.app/Contents/MacOS/GitSync --load-test         # EventBuffer
-.build/.../GitSync.app/Contents/MacOS/GitSync --pipe-stress-test  # pipe reader
+.build/.../GitSync.app/Contents/MacOS/GitSync --verify-parser              # EventParser
+.build/.../GitSync.app/Contents/MacOS/GitSync --smoke-test                 # engine wiring (no providers)
+.build/.../GitSync.app/Contents/MacOS/GitSync --load-test                  # EventBuffer throughput
+.build/.../GitSync.app/Contents/MacOS/GitSync --trash-test                 # delete-path safety
+.build/.../GitSync.app/Contents/MacOS/GitSync --whitelist-test             # tracked-only filter
+.build/.../GitSync.app/Contents/MacOS/GitSync --provider-migration-test    # legacy→provider migration
+.build/.../GitSync.app/Contents/MacOS/GitSync --provider-validation-test   # provider folder-collision guard
+.build/.../GitSync.app/Contents/MacOS/GitSync --abort-reset-test           # cancel doesn't poison later syncs
+.build/.../GitSync.app/Contents/MacOS/GitSync --engine-sync [--only <rel>|--list-only]   # run the engine from a shell
 ```
-
-These exist because the Command Line Tools toolchain doesn't ship XCTest or swift-testing.
 
 ## Inventory data
 
 Stored at `~/Library/Application Support/GitSync/inventory.json` as a JSON array of `Repo` records. Pruned only when the user manually clears the file (no automatic eviction in v1).
-
-## Python CLI flags
-
-The platform scripts accept two app-driven flags in addition to the env-var config:
-
-- `--list-only` — discover, emit `remote_project` events, exit. No clones. Used to refresh the inventory cheaply.
-- `--only <rel>` — discover, then narrow `jobs` to a single repo. Used by the Repositories view's per-repo "Sync this repo" action.
-
-These flags are silently ignored when running the scripts directly from a shell without GIT_SYNC_EVENTS=1; the unbatched output is the same as before.
