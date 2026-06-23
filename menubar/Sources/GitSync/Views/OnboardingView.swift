@@ -63,7 +63,7 @@ struct OnboardingView: View {
             .padding(12)
         }
         .frame(width: 580, height: 640)
-        .onAppear { bringOnboardingToFront() }
+        .onAppear { bringAppWindowsToFront() }
     }
 
     private func finish() {
@@ -71,13 +71,5 @@ struct OnboardingView: View {
         // configured something, the next scheduled/manual run will pick it up.
         settings.hasCompletedSetup = true
         dismiss()
-    }
-}
-
-@MainActor
-private func bringOnboardingToFront() {
-    DispatchQueue.main.async { @MainActor in
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.filter { $0.isVisible }.forEach { $0.orderFrontRegardless() }
     }
 }

@@ -40,7 +40,7 @@ struct HistoryWindow: View {
         .frame(minWidth: 720, minHeight: 480)
         .onAppear {
             if selected == nil { selected = runs.first?.id }
-            bringWindowToFront()
+            bringAppWindowsToFront()
         }
         // When a run starts, jump the selection to the live entry.
         .onChange(of: state.currentRun?.id) { _, liveID in
@@ -244,13 +244,5 @@ private struct WorkerRow: View {
                 .foregroundStyle(isStalled ? .orange : .secondary)
                 .frame(minWidth: 38, alignment: .trailing)
         }
-    }
-}
-
-@MainActor
-private func bringWindowToFront() {
-    DispatchQueue.main.async { @MainActor in
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.filter { $0.isVisible }.forEach { $0.orderFrontRegardless() }
     }
 }

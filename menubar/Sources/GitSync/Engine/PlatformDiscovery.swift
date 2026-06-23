@@ -7,7 +7,9 @@ import Foundation
 // listing would flag every un-enumerated repo as deleted).
 
 struct DiscoveredRepo: Sendable {
-    let rel: String            // sync-root-relative incl. platform dir, e.g. "Gitlab/foo/bar"
+    // Provider-local path, relative to the client's platformRoot (the provider's
+    // localPath). No platform-dir prefix in the multi-provider model, e.g. "foo/bar".
+    let rel: String
     let sshURL: String
     let defaultBranch: String
     let namespacePath: String  // platform-native path used for skip-matching
@@ -29,7 +31,9 @@ protocol PlatformDiscovery: Sendable {
     // discoverAll grind through 5 × 60s connect timeouts (~5 min).
     var probeURL: URL? { get }
     func discoverAll(skip: SkipMatcher) -> DiscoveryResult
-    func discoverOne(rel: String) -> DiscoveredRepo?
+    // `namespacePath` is the platform-native repo path (RepoID.namespacePath):
+    // GitLab path_with_namespace, GitHub repo name, Bitbucket slug.
+    func discoverOne(namespacePath: String) -> DiscoveredRepo?
 }
 
 // Fast reachability probe: can we open a connection to `url` within `timeout`
@@ -146,7 +150,7 @@ struct GitLabClient: PlatformDiscovery {
         return result
     }
 
-    func discoverOne(rel target: String) -> DiscoveredRepo? {
+    func discoverOne(namespacePath target: String) -> DiscoveredRepo? {
         // `target` is the bare namespace path (caller passes RepoID.namespacePath).
         // URL-encode it (slashes become %2F) for GET /projects/:url-encoded-path.
         let ns = target
@@ -301,7 +305,7 @@ struct GitHubClient: PlatformDiscovery {
         return result
     }
 
-    func discoverOne(rel target: String) -> DiscoveredRepo? {
+    func discoverOne(namespacePath target: String) -> DiscoveredRepo? {
         let name = target   // bare repo name (caller passes RepoID.namespacePath)
         guard let url = URL(string: "\(api)/repos/\(org)/\(name)") else { return nil }
         guard let resp = try? HTTPClient.get(url, headers: headers, accept: accept),
@@ -383,7 +387,7 @@ struct BitbucketClient: PlatformDiscovery {
         return result
     }
 
-    func discoverOne(rel target: String) -> DiscoveredRepo? {
+    func discoverOne(namespacePath target: String) -> DiscoveredRepo? {
         let slug = target   // bare repo slug (caller passes RepoID.namespacePath)
         guard let url = URL(string:
             "\(api)/repositories/\(workspace)/\(slug)?fields=slug,mainbranch.name,links.clone") else { return nil }

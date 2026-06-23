@@ -11,7 +11,7 @@ struct MenuContent: View {
             Text("Not set up yet")
             Button("Set Up GitSync…") {
                 openWindow(id: "onboarding")
-                activateAppToFront()
+                bringAppWindowsToFront()
             }
             Divider()
         }
@@ -57,13 +57,13 @@ struct MenuContent: View {
 
         Button("Show repositories…") {
             openWindow(id: "repositories")
-            activateAppToFront()
+            bringAppWindowsToFront()
         }
         .keyboardShortcut("h", modifiers: .command)
 
         Button("Show history…") {
             openWindow(id: "history")
-            activateAppToFront()
+            bringAppWindowsToFront()
         }
         .keyboardShortcut("h", modifiers: [.command, .shift])
 
@@ -72,7 +72,7 @@ struct MenuContent: View {
             // case shows a more prominent "Set Up GitSync…" at the top).
             Button("Set Up GitSync…") {
                 openWindow(id: "onboarding")
-                activateAppToFront()
+                bringAppWindowsToFront()
             }
         }
 
@@ -85,7 +85,7 @@ struct MenuContent: View {
             // itself doesn't activate the app, so the window opens behind
             // whatever the user previously had in front.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                activateAppToFront()
+                bringAppWindowsToFront()
             }
         })
 
@@ -175,8 +175,3 @@ private struct AnomaliesSubmenu: View {
     }
 }
 
-@MainActor
-private func activateAppToFront() {
-    NSApp.activate(ignoringOtherApps: true)
-    NSApp.windows.filter { $0.isVisible }.forEach { $0.orderFrontRegardless() }
-}

@@ -20,7 +20,7 @@ struct SettingsWindow: View {
         // Force the Settings window to float to the front when opened; the
         // default behavior in a LSUIElement app leaves it behind other
         // app windows on the same Space.
-        .onAppear { bringWindowToFront() }
+        .onAppear { bringAppWindowsToFront() }
     }
 }
 
@@ -204,19 +204,5 @@ struct FolderField: View {
         if panel.runModal() == .OK, let url = panel.url {
             value = url.path
         }
-    }
-}
-
-// Helper: nudge the foreground app's key window to the front. SwiftUI's
-// Settings scene doesn't activate the app, so opening Settings from a
-// MenuBarExtra leaves the window stacked behind whatever the user was
-// previously focused on.
-@MainActor
-private func bringWindowToFront() {
-    DispatchQueue.main.async { @MainActor in
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows
-            .filter { $0.isVisible }
-            .forEach { $0.orderFrontRegardless() }
     }
 }

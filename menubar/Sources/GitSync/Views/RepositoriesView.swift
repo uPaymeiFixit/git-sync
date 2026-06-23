@@ -16,7 +16,7 @@ struct RepositoriesView: View {
 
     @State private var searchText: String = ""
     @State private var enabledStatuses: Set<SyncStatus> = Set(SyncStatus.allCases)
-    @State private var enabledPlatforms: Set<String> = ["gitlab", "github", "bitbucket"]
+    @State private var enabledPlatforms: Set<String> = Set(Platform.allCases.map(\.rawValue))
     @State private var collapsedSections: Set<SyncStatus> = []
     @State private var selection: Set<RepoID> = []
     @State private var pendingTrash: Set<RepoID> = []
@@ -68,7 +68,7 @@ struct RepositoriesView: View {
             }
         }
         .frame(minWidth: 820, minHeight: 540)
-        .onAppear { bringWindowToFront() }
+        .onAppear { bringAppWindowsToFront() }
     }
 
     // MARK: - Toolbar (search + filters)
@@ -108,10 +108,10 @@ struct RepositoriesView: View {
                     }
                 }
                 Spacer()
-                ForEach(["gitlab", "github", "bitbucket"], id: \.self) { platform in
-                    PlatformChip(platform: platform,
-                                 isOn: enabledPlatforms.contains(platform)) {
-                        togglePlatform(platform)
+                ForEach(Platform.allCases, id: \.rawValue) { platform in
+                    PlatformChip(platform: platform.rawValue,
+                                 isOn: enabledPlatforms.contains(platform.rawValue)) {
+                        togglePlatform(platform.rawValue)
                     }
                 }
             }
@@ -534,16 +534,5 @@ private struct PlatformChip: View {
                 .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
         }
         .buttonStyle(.plain)
-    }
-}
-
-// Bring the window to the front when opened from the menu bar. SwiftUI
-// MenuBarExtra → Window doesn't activate the app, so the window opens
-// behind whatever the user previously had focused.
-@MainActor
-private func bringWindowToFront() {
-    DispatchQueue.main.async { @MainActor in
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.filter { $0.isVisible }.forEach { $0.orderFrontRegardless() }
     }
 }

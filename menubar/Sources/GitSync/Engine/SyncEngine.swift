@@ -429,7 +429,7 @@ actor SyncEngine {
         if sshURL.isEmpty || branch.isEmpty {
             // Pass the BARE namespace path: provider rels are already bare;
             // namespacePath strips a legacy "Gitlab/" prefix if present.
-            guard let repo = client.discoverOne(rel: id.namespacePath) else {
+            guard let repo = client.discoverOne(namespacePath: id.namespacePath) else {
                 await failOutcome("not found in remote listing (check provider workspace/org + token)")
                 return
             }
