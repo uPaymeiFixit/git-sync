@@ -60,6 +60,33 @@ final class ProviderStore: ObservableObject {
         save()
     }
 
+    // Append a skip pattern (case-insensitive, comma-separated) to the provider
+    // the repo belongs to — the engine reads THIS (per-provider) list, so this
+    // is what actually affects sync behavior. No-op if the pattern is already
+    // present or the provider can't be found (e.g. an un-migrated row).
+    func addSkipPattern(_ pattern: String, providerID: UUID) {
+        let p = pattern.trimmingCharacters(in: .whitespaces)
+        guard !p.isEmpty, let idx = providers.firstIndex(where: { $0.id == providerID }) else { return }
+        guard !skipEntries(providers[idx].skipPatterns).contains(p.lowercased()) else { return }
+        let existing = providers[idx].skipPatterns.trimmingCharacters(in: .whitespacesAndNewlines)
+        providers[idx].skipPatterns = existing.isEmpty ? p : existing + ", " + p
+        save()
+    }
+
+    // Is `namespacePath` already skipped by its provider's patterns? Mirrors the
+    // engine's SkipMatcher (case-insensitive prefix match).
+    func isSkipped(namespacePath: String, providerID: UUID) -> Bool {
+        guard let p = providers.first(where: { $0.id == providerID }) else { return false }
+        let path = namespacePath.lowercased()
+        return skipEntries(p.skipPatterns).contains { path.hasPrefix($0) }
+    }
+
+    private func skipEntries(_ raw: String) -> [String] {
+        raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
     var enabledProviders: [Provider] { providers.filter { $0.enabled && $0.isConfigured } }
 
     var isConfigured: Bool { !enabledProviders.isEmpty }

@@ -226,9 +226,9 @@ struct RepositoriesView: View {
             }
             Divider()
             Button("Add to skip list") {
-                RepoActions.addToSkipList(repo: repo, settings: settings)
+                RepoActions.addToSkipList(repo: repo, providers: providers)
             }
-            .disabled(RepoActions.isInSkipList(repo: repo, settings: settings))
+            .disabled(RepoActions.isInSkipList(repo: repo, providers: providers))
             if repo.isClonedLocally {
                 Button("Move to Trash…", role: .destructive) {
                     requestTrash([id])
@@ -247,8 +247,8 @@ struct RepositoriesView: View {
             Button("Add \(ids.count) to skip list") {
                 for id in ids {
                     if let repo = inventory.repos[id],
-                       !RepoActions.isInSkipList(repo: repo, settings: settings) {
-                        RepoActions.addToSkipList(repo: repo, settings: settings)
+                       !RepoActions.isInSkipList(repo: repo, providers: providers) {
+                        RepoActions.addToSkipList(repo: repo, providers: providers)
                     }
                 }
             }
@@ -329,7 +329,7 @@ struct RepositoriesView: View {
 
 private struct RepoRow: View {
     @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var providers: ProviderStore
     let repo: Repo
 
     var body: some View {
@@ -441,11 +441,11 @@ private struct RepoRow: View {
     }
 
     private var isInSkipList: Bool {
-        RepoActions.isInSkipList(repo: repo, settings: settings)
+        RepoActions.isInSkipList(repo: repo, providers: providers)
     }
 
     private func addToSkipList() {
-        RepoActions.addToSkipList(repo: repo, settings: settings)
+        RepoActions.addToSkipList(repo: repo, providers: providers)
     }
 }
 
@@ -468,23 +468,19 @@ enum RepoActions {
         }
     }
 
-    // Skip patterns use the platform's namespace path (no "Gitlab/" etc.
-    // prefix) — that's what the Python's matches_skip compares against.
-    static func isInSkipList(repo: Repo, settings: SettingsStore) -> Bool {
-        let path = repo.id.namespacePath.lowercased()
-        let entries = settings.skipPatterns
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-        return entries.contains { !$0.isEmpty && path.hasPrefix($0) }
+    // Skip patterns are PER-PROVIDER: the engine builds its SkipMatcher from the
+    // repo's parent Provider.skipPatterns (SyncEngine via SkipMatcher), so these
+    // must read/write that provider — not the legacy global settings.skipPatterns,
+    // which the engine no longer reads. Matching uses the platform's namespace
+    // path (no "Gitlab/" prefix), mirroring SkipMatcher in PlatformDiscovery.
+    static func isInSkipList(repo: Repo, providers: ProviderStore) -> Bool {
+        guard let pid = UUID(uuidString: repo.id.providerID) else { return false }
+        return providers.isSkipped(namespacePath: repo.id.namespacePath, providerID: pid)
     }
 
-    static func addToSkipList(repo: Repo, settings: SettingsStore) {
-        let trimmed = settings.skipPatterns.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            settings.skipPatterns = repo.id.namespacePath
-        } else {
-            settings.skipPatterns = trimmed + ", " + repo.id.namespacePath
-        }
+    static func addToSkipList(repo: Repo, providers: ProviderStore) {
+        guard let pid = UUID(uuidString: repo.id.providerID) else { return }
+        providers.addSkipPattern(repo.id.namespacePath, providerID: pid)
     }
 }
 
