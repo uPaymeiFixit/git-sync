@@ -389,8 +389,18 @@ actor SyncEngine {
 
     private func runIndividual(id: RepoID, knownSSH: String?, knownBranch: String?) async {
         defer { Task { await self.clearIndividual(id) } }
+        // Emit an error outcome so the repo row reflects the failure (the status
+        // pill is driven by .outcome events; individualFinished only clears the
+        // spinner). Without this, a failed individual sync silently reverts the
+        // row to whatever it was (e.g. "not-cloned-yet") with no error shown.
+        func failOutcome(_ detail: String, exitCode: Int32 = 1) async {
+            await sink.emit(.outcome(platform: id.platform,
+                outcome: Outcome(platform: id.platform, rel: id.rel, status: .error,
+                                 detail: detail, providerID: id.providerID)))
+            await sink.individualFinished(id, exitCode: exitCode)
+        }
         guard Platform(rawValue: id.platform) != nil else {
-            await sink.individualFinished(id, exitCode: -1)
+            await failOutcome("unknown platform '\(id.platform)'", exitCode: -1)
             return
         }
         // Resolve the provider this repo belongs to (its client + dest folder),
@@ -400,9 +410,7 @@ actor SyncEngine {
         // fail cleanly rather than guessing a folder or credentials.
         guard !id.providerID.isEmpty,
               let unit = runUnits(only: nil).first(where: { $0.providerID == id.providerID }) else {
-            await sink.logLine("\(id.rel): no configured provider for this repo — skipping",
-                               platform: id.platform)
-            await sink.individualFinished(id, exitCode: 1)
+            await failOutcome("no configured provider for this repo")
             return
         }
         let destRoot = unit.destRoot            // provider folder + bare rel
@@ -422,8 +430,7 @@ actor SyncEngine {
             // Pass the BARE namespace path: provider rels are already bare;
             // namespacePath strips a legacy "Gitlab/" prefix if present.
             guard let repo = client.discoverOne(rel: id.namespacePath) else {
-                await sink.logLine("--only \(id.rel): not found in remote listing", platform: id.platform)
-                await sink.individualFinished(id, exitCode: 1)
+                await failOutcome("not found in remote listing (check provider workspace/org + token)")
                 return
             }
             sshURL = repo.sshURL

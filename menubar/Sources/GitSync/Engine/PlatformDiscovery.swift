@@ -185,7 +185,17 @@ struct GitLabClient: PlatformDiscovery {
 // clients. Returns (status, data) or throws after `attempts`.
 
 enum HTTPClient {
-    struct HTTPCodeError: Error { let code: Int }
+    struct HTTPCodeError: LocalizedError {
+        let code: Int
+        var errorDescription: String? {
+            switch code {
+            case 401: return "HTTP 401 unauthorized — check the token / app password"
+            case 403: return "HTTP 403 forbidden — the token lacks access (or is wrong)"
+            case 404: return "HTTP 404 not found — check the workspace / org / host slug"
+            default:  return "HTTP \(code)"
+            }
+        }
+    }
 
     // Mutable box for the URLSession completion handler. The semaphore
     // provides the happens-before barrier (signal after writes, read after

@@ -4,11 +4,16 @@ struct SettingsWindow: View {
     @EnvironmentObject private var settings: SettingsStore
 
     var body: some View {
+        // Each tab's content is pinned to the same fixed size. Without this,
+        // live updates inside a tab (e.g. the Providers list refreshing during
+        // a sync) change that tab's ideal size, AppKit re-measures the TabView,
+        // and the tab-bar icons jitter a few pixels. A constant content size
+        // keeps the measurement — and the tab bar — stable.
         TabView {
-            PathsTab().tabItem { Label("Locations", systemImage: "folder") }
-            ProvidersTab().tabItem { Label("Providers", systemImage: "rectangle.connected.to.line.below") }
-            BehaviorTab().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
-            ScheduleTab().tabItem { Label("Schedule", systemImage: "clock") }
+            PathsTab().tabContentFrame().tabItem { Label("Locations", systemImage: "folder") }
+            ProvidersTab().tabContentFrame().tabItem { Label("Providers", systemImage: "rectangle.connected.to.line.below") }
+            BehaviorTab().tabContentFrame().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
+            ScheduleTab().tabContentFrame().tabItem { Label("Schedule", systemImage: "clock") }
         }
         .frame(width: 580, height: 460)
         .padding()
@@ -16,6 +21,14 @@ struct SettingsWindow: View {
         // default behavior in a LSUIElement app leaves it behind other
         // app windows on the same Space.
         .onAppear { bringWindowToFront() }
+    }
+}
+
+private extension View {
+    // Pin a tab's content to fill the TabView's fixed area, so its measured
+    // size doesn't drift as the content updates (which would jitter the tab bar).
+    func tabContentFrame() -> some View {
+        frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
