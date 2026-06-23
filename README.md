@@ -1,96 +1,80 @@
-# git-sync
+# GitSync
 
-Sync every repo you have access to across multiple Git hosts to local disk. Idempotent — re-run anytime.
+A native macOS menu-bar app that mirrors every repo you have access to across
+multiple Git hosts to local disk, and keeps them up to date. Idempotent — runs
+on a schedule or on demand, and never overwrites local work.
 
-**Currently supports:** Bitbucket Cloud, self-hosted GitLab, and GitHub.com. Each is optional — configure any subset.
+**Supports:** self-hosted GitLab, GitHub.com, and Bitbucket Cloud. Configure any
+subset as independent *providers* — you can have several of the same kind (e.g.
+two GitLab instances), each with its own host, scope, token, and disk folder.
 
-## Setup
+The sync engine is pure Swift (no Python, no external CLIs). All configuration
+lives in the app — there are no environment variables or config files to manage.
 
-**Prereqs:** Python 3.10+, `git`, [`glab`](https://gitlab.com/gitlab-org/cli) (for GitLab), SSH access to the hosts you'll sync from.
-
-**Bitbucket creds** — either `~/.netrc` (preferred, `chmod 600`):
-
-```
-machine api.bitbucket.org
-    login <bitbucket-username>
-    password <app-password>
-```
-
-or env vars (see [.envrc.example](.envrc.example)). The app password needs the `read:repository:bitbucket` scope (create at https://bitbucket.org/account/settings/app-passwords/).
-
-**GitLab creds** — `glab auth login --hostname <your-gitlab-host>` (token needs `read_api` + `read_repository`).
-
-**GitHub creds** — either `~/.netrc` (preferred):
+## Build & install
 
 ```
-machine api.github.com
-    login <github-username>
-    password <personal-access-token>
+cd menubar
+./Tools/make-signing-cert.sh    # one-time: stable signing identity (stops keychain re-prompts)
+./build.sh release              # produces .build/release/GitSync.app
+cp -r .build/release/GitSync.app /Applications/
+xattr -dr com.apple.quarantine /Applications/GitSync.app   # first launch only
+open /Applications/GitSync.app
 ```
 
-or env var `GIT_SYNC_GITHUB_TOKEN`. Classic PATs need the `repo` scope to access private repos; fine-grained PATs need `Contents: Read` + `Metadata: Read` on the target org. Create one at https://github.com/settings/tokens.
-
-Any platform's creds may be omitted — that platform is skipped with a notice.
+See [menubar/README.md](menubar/README.md) for architecture, the signing/keychain
+details, and the CLI test harnesses.
 
 ## Configuration
 
-All configuration is via environment variables. See [.envrc.example](.envrc.example) for the full list with comments. The short version:
+Everything is configured in the app — **Settings → Providers** (⌘,). Add a
+provider per source:
 
-| Var | Required? |
-|---|---|
-| `GIT_SYNC_ROOT` | Always |
-| `GIT_SYNC_BITBUCKET_WORKSPACE` | Only if syncing Bitbucket |
-| `GITLAB_HOST` | Only if syncing GitLab |
-| `GIT_SYNC_GITHUB_ORG` | Only if syncing GitHub |
-| `GIT_SYNC_SKIP` | Optional |
-| `GIT_SYNC_INCLUDE_ARCHIVED` | Optional (set to any non-empty value to also sync archived repos; affects GitLab + GitHub, no effect on Bitbucket) |
-| `GIT_SYNC_SKIP_BITBUCKET`, `GIT_SYNC_SKIP_GITLAB`, `GIT_SYNC_SKIP_GITHUB` | Optional (set to any non-empty value to skip that platform even when configured) |
-| `GIT_SYNC_BITBUCKET_USER`, `GIT_SYNC_BITBUCKET_APP_PASSWORD` | Optional (alternative to `~/.netrc`) |
-| `GIT_SYNC_GITHUB_TOKEN` | Optional (alternative to `~/.netrc`) |
-| `GIT_SYNC_PARALLEL` | Optional (default 8; 24–64 is realistic with SSH multiplexing on) |
-| `GIT_SYNC_NO_SSH_MUX` | Optional (set to `1` to disable SSH `ControlMaster`) |
-| `GIT_SYNC_DEPTH` | Optional (default 100; `0` for full history) |
-| `GIT_SYNC_TIMEOUT` | Optional (default 1800; max seconds per clone/fetch) |
+- **GitLab** — the instance **Host** (e.g. `gitlab.example.com`) + a personal
+  access token with `read_api` + `read_repository`.
+- **GitHub** — the **Organization** + a token. Classic PATs need the `repo`
+  scope for private repos; fine-grained PATs need `Contents: Read` +
+  `Metadata: Read` on the org.
+- **Bitbucket** — the **Workspace** (the `bitbucket.org/<workspace>/…` slug) +
+  your Bitbucket **Username** and an **App password** with the
+  `read:repository:bitbucket` scope.
 
-Quickest setup: `cp .envrc.example .envrc`, edit values, then either `direnv allow` or `source .envrc`.
+Each provider also has its own **disk folder**, **skip patterns**, an
+**Include archived repos** toggle, and a **sync scope** (sync everything, or
+only repos you've tracked). Tokens are stored in the macOS Keychain.
 
-## Usage
-
-From inside the repo:
-
-```
-./scripts/sync-all.py        # all configured platforms
-./scripts/sync-bitbucket.py
-./scripts/sync-gitlab.py
-./scripts/sync-github.py
-```
-
-Or invoke by full path from anywhere — cwd doesn't matter, the scripts use `GIT_SYNC_ROOT` for paths.
+Other settings live under **Behavior** (parallel workers, clone depth, timeout)
+and **Schedule** (manual / every-N-hours / daily, plus Launch at Login).
 
 ## Behavior
 
-For each repo: clone if missing, otherwise fetch + fast-forward the default branch when safe. **Never** force, reset, or overwrite local work. Uncommitted changes on non-colliding paths are preserved across the fast-forward (so leaving e.g. `.vscode/settings.json` edited won't block updates); if your changes would collide with incoming files, git refuses and the repo is reported as dirty instead. Diverged branches (local commits not on remote) are reported, not touched. End-of-run summary categorizes every repo (see the legend the script prints).
+For each repo: clone if missing, otherwise fetch + fast-forward the default
+branch when safe. **Never** force, reset, or overwrite local work. Uncommitted
+changes on non-colliding paths are preserved across the fast-forward (so leaving
+e.g. `.vscode/settings.json` edited won't block updates); if your changes would
+collide with incoming files, git refuses and the repo is reported as dirty
+instead. Diverged branches (local commits not on remote) are reported, not
+touched.
+
+The **Repositories** window (⌘H) shows a live inventory of every known repo
+keyed by `(provider, platform, rel)`, grouped by status (diverged, dirty, stale,
+not-cloned-yet, …) and searchable/filterable. Click a repo to reveal it in
+Finder; right-click for per-repo actions (sync this one, add to skip list, copy
+SSH URL). **Run history** (⇧⌘H) keeps the per-run log for when something needs
+investigating.
 
 ## Skipping repos
 
-Set `GIT_SYNC_SKIP` to a comma-separated list of repo names or path prefixes. Case-insensitive, prefix match. Examples:
+Each provider has a **Skip patterns** field: a comma-separated list of repo
+names or path prefixes to skip (case-insensitive, prefix match), e.g.
+`legacy-monorepo, some-group/archive/`. Skipped repos still appear in the
+inventory (marked skipped) so you know they exist; their on-disk state is left
+alone.
 
-```
-GIT_SYNC_SKIP="legacy-monorepo"             # skip one repo
-GIT_SYNC_SKIP="some-group/archive/"         # skip a whole subtree
-GIT_SYNC_SKIP="legacy, some-group/archive"  # multiple
-```
+## Scheduling
 
-Skipped repos are listed in the summary so you know they exist; their on-disk state is left alone.
-
-## Scheduling with cron
-
-Cron runs with a minimal environment, so set the vars inline. Example: sync once a day at 3 AM, log to a file.
-
-```
-0 3 * * * GIT_SYNC_ROOT=$HOME/git/synced GIT_SYNC_BITBUCKET_WORKSPACE=my-workspace GITLAB_HOST=gitlab.example.com $HOME/git/git-sync/scripts/sync-all.py >> $HOME/.git-sync.log 2>&1
-```
-
-Adjust `$HOME/git/git-sync/` to wherever you cloned this repo.
-
-If credentials live in `~/.netrc` (Bitbucket) and `glab`'s config (GitLab), cron will find them — no extra setup. If you use env-var-based Bitbucket creds, add `GIT_SYNC_BITBUCKET_USER=...` and `GIT_SYNC_BITBUCKET_APP_PASSWORD=...` to the same line.
+Set **Settings → Schedule** to every-N-hours or daily. Scheduled runs fire while
+GitSync is running, with sleep-aware catch-up for missed runs; enable **Launch
+at Login** so the app comes back after a reboot. A platform that's unreachable
+(e.g. GitLab behind a VPN that's down) is isolated — it stays due and retries
+cheaply without dragging the others along or touching any repos.

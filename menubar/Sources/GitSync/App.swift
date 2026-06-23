@@ -32,9 +32,6 @@ struct GitSyncApp: App {
         if args.contains("--trash-test") {
             exit(TrashTest.run())
         }
-        if args.contains("--engine-sync") {
-            exit(EngineSyncMode.run(args: Array(args)))
-        }
         if args.contains("--abort-reset-test") {
             exit(AbortResetTest.run())
         }

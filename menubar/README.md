@@ -1,20 +1,26 @@
 # GitSync menu-bar app
 
-Native macOS menu-bar app for the git-sync scripts. Persistent **Repositories** inventory of every repo you have access to, organized by status — at-a-glance: which are diverged, dirty, stale, not-yet-cloned, etc. Click a repo to reveal it in Finder; right-click for per-repo actions (sync this one, add to skip list, copy SSH URL).
+Native macOS menu-bar app that mirrors every repo you have access to across
+GitLab/GitHub/Bitbucket to local disk. Persistent **Repositories** inventory
+organized by status — at-a-glance: which are diverged, dirty, stale,
+not-yet-cloned, etc. Click a repo to reveal it in Finder; right-click for
+per-repo actions (sync this one, add to skip list, copy SSH URL).
+
+The sync engine is pure Swift — it drives git directly (no Python, no external
+CLIs). Configuration is in-app (UserDefaults + Keychain); there are no env vars.
 
 ## Features
 
-- **Repositories window** (⌘H): live inventory keyed by `(platform, rel)`. Searchable + filterable by status and platform. Survives across runs and app restarts. Status pills with hover tooltips.
-- **Run history** (⇧⌘H): the per-run log view, for when you want the script's stderr from a specific run.
-- **Settings** (⌘,): GIT_SYNC_* env vars + per-platform credentials (Keychain-backed). Bundles `glab` so GitLab works without a separate install.
+- **Repositories window** (⌘H): live inventory keyed by `(providerID, platform, rel)`. Searchable + filterable by status and platform. Survives across runs and app restarts. Status pills with hover tooltips.
+- **Run history** (⇧⌘H): the per-run log view, for investigating a specific run.
+- **Settings** (⌘,): a list of providers (host/scope/token/folder/skip per provider), plus Behavior + Schedule. Tokens are Keychain-backed.
 - **Schedule**: timer-based, with Launch at Login.
-- **Per-repo sync**: right-click a repo → "Sync this repo" runs the Python with `--only <rel>`.
+- **Per-repo sync**: right-click a repo → "Sync this repo" syncs just that one.
 
 ## Requirements
 
-- macOS 14+
+- macOS 15+
 - Swift 6 toolchain (ships with Xcode 16 or Command Line Tools 16+)
-- `/usr/bin/python3` (macOS 14+ ships Python 3.9 there)
 
 ## Build + install
 
