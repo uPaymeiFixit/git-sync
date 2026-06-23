@@ -19,15 +19,7 @@ final class SettingsStore: ObservableObject {
     // ---- Persistence keys ---------------------------------------------
     private enum DKey {
         static let syncRoot               = "syncRoot"
-        static let gitlabHost             = "gitlabHost"
-        static let githubOrg              = "githubOrg"
-        static let bitbucketWorkspace     = "bitbucketWorkspace"
-        static let bitbucketUser          = "bitbucketUser"
-        static let skipBitbucket          = "skipBitbucket"
-        static let skipGitlab             = "skipGitlab"
-        static let skipGithub             = "skipGithub"
-        static let includeArchived        = "includeArchived"
-        static let skipPatterns           = "skipPatterns"
+        static let skipPatterns           = "skipPatterns"   // legacy global; seeds per-provider skip once (migration)
         static let parallel               = "parallel"
         static let timeout                = "timeout"
         static let depth                  = "depth"
@@ -40,39 +32,13 @@ final class SettingsStore: ObservableObject {
         static let filterModeByPlatform   = "filterModeByPlatform"   // [platform rawValue: FilterMode raw]
         static let hasCompletedSetup      = "hasCompletedSetup"      // first-launch onboarding done
     }
-    // Legacy single-per-kind Keychain account names. Shared with ProviderStore
-    // so the provider-migration's token lookup can't drift from these (a
-    // mismatch silently drops the token — see ProviderStore.legacyTokenKey).
-    typealias KKey = LegacyKeychainKey
 
     // ---- UserDefaults-backed scalars (auto-publishing) ----------------
     @Published var syncRoot: String {
         didSet { UserDefaults.standard.set(syncRoot, forKey: DKey.syncRoot) }
     }
-    @Published var gitlabHost: String {
-        didSet { UserDefaults.standard.set(gitlabHost, forKey: DKey.gitlabHost) }
-    }
-    @Published var githubOrg: String {
-        didSet { UserDefaults.standard.set(githubOrg, forKey: DKey.githubOrg) }
-    }
-    @Published var bitbucketWorkspace: String {
-        didSet { UserDefaults.standard.set(bitbucketWorkspace, forKey: DKey.bitbucketWorkspace) }
-    }
-    @Published var bitbucketUser: String {
-        didSet { UserDefaults.standard.set(bitbucketUser, forKey: DKey.bitbucketUser) }
-    }
-    @Published var skipBitbucket: Bool {
-        didSet { UserDefaults.standard.set(skipBitbucket, forKey: DKey.skipBitbucket) }
-    }
-    @Published var skipGitlab: Bool {
-        didSet { UserDefaults.standard.set(skipGitlab, forKey: DKey.skipGitlab) }
-    }
-    @Published var skipGithub: Bool {
-        didSet { UserDefaults.standard.set(skipGithub, forKey: DKey.skipGithub) }
-    }
-    @Published var includeArchived: Bool {
-        didSet { UserDefaults.standard.set(includeArchived, forKey: DKey.includeArchived) }
-    }
+    // Legacy global skip list. No live UI writes it anymore (skip is per-provider);
+    // kept only so migrateGlobalSkipIfNeeded can seed providers from it once.
     @Published var skipPatterns: String {
         didSet { UserDefaults.standard.set(skipPatterns, forKey: DKey.skipPatterns) }
     }
@@ -128,63 +94,26 @@ final class SettingsStore: ObservableObject {
         FilterMode(rawValue: filterModeByPlatform[platform] ?? "") ?? .syncAll
     }
 
-    // Platforms that are configured AND not skipped — mirrors the engine's
-    // enabledPlatforms() gate, but from the settings the scheduler can see.
-    var enabledPlatforms: [Platform] {
-        var out: [Platform] = []
-        if !skipGitlab,    !gitlabHost.isEmpty         { out.append(.gitlab) }
-        if !skipGithub,    !githubOrg.isEmpty          { out.append(.github) }
-        if !skipBitbucket, !bitbucketWorkspace.isEmpty { out.append(.bitbucket) }
-        return out
-    }
+    // (Enabled platforms + "is configured?" live on ProviderStore now — the
+    // source of truth for what to sync. The Scheduler reads
+    // ProviderStore.enabledPlatforms; onboarding reads ProviderStore.isConfigured.)
 
     // ---- First-launch onboarding -------------------------------------
 
-    // True once at least one platform has its required identity field set —
-    // i.e. the app can actually do something. Used to decide whether to show
-    // onboarding and as the menu/inventory empty-state trigger.
-    var isConfigured: Bool {
-        !gitlabHost.isEmpty || !githubOrg.isEmpty || !bitbucketWorkspace.isEmpty
-    }
-
     // Persisted: the user has been through (or dismissed) first-launch setup.
-    // Distinct from isConfigured so we don't re-pop onboarding for someone who
-    // intentionally left everything blank.
     @Published var hasCompletedSetup: Bool {
         didSet { UserDefaults.standard.set(hasCompletedSetup, forKey: DKey.hasCompletedSetup) }
     }
 
-    // Show the first-launch onboarding window? Only when nothing is configured
-    // AND the user hasn't already completed/dismissed setup.
-    var shouldShowOnboarding: Bool { !hasCompletedSetup && !isConfigured }
-
-    // ---- Keychain-backed secrets --------------------------------------
-    @Published var githubToken: String {
-        didSet { Keychain.set(githubToken, for: KKey.githubToken) }
-    }
-    @Published var gitlabToken: String {
-        didSet { Keychain.set(gitlabToken, for: KKey.gitlabToken) }
-    }
-    @Published var bitbucketAppPassword: String {
-        didSet { Keychain.set(bitbucketAppPassword, for: KKey.bitbucketPassword) }
-    }
 
     // ---- Init ---------------------------------------------------------
     init() {
         let d = UserDefaults.standard
         let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-        // Paciolan-flavored defaults. The app is primarily for the
-        // Paciolan team's use, so pre-fill what we know.
+        // Paciolan-flavored default for the sync root. Per-provider host/scope/
+        // token now live on ProviderStore (seeded once by its legacy migration).
         self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git/Paciolan"
-        self.gitlabHost         = d.string(forKey: DKey.gitlabHost) ?? "gitlabdev.paciolan.info"
-        self.githubOrg          = d.string(forKey: DKey.githubOrg) ?? "Paciolan"
-        self.bitbucketWorkspace = d.string(forKey: DKey.bitbucketWorkspace) ?? "paciolan"
-        self.bitbucketUser      = d.string(forKey: DKey.bitbucketUser) ?? ""
-        self.skipBitbucket      = d.bool(forKey: DKey.skipBitbucket)
-        self.skipGitlab         = d.bool(forKey: DKey.skipGitlab)
-        self.skipGithub         = d.bool(forKey: DKey.skipGithub)
-        self.includeArchived    = d.bool(forKey: DKey.includeArchived)
         self.skipPatterns       = d.string(forKey: DKey.skipPatterns) ?? ""
         self.parallel           = d.object(forKey: DKey.parallel) as? Int ?? 128
         self.timeout            = d.object(forKey: DKey.timeout) as? Int ?? 1800
@@ -201,25 +130,22 @@ final class SettingsStore: ObservableObject {
         if let dict = d.dictionary(forKey: DKey.lastSuccessByPlatform) as? [String: Date] {
             self.lastSuccessByPlatform = dict
         } else if let legacy = d.object(forKey: DKey.lastSuccessfulRun) as? Date {
-            // Read the enabled-state straight from UserDefaults (can't touch
-            // self.* here — still mid-init). Mirror the same gates the host/
-            // skip fields were just loaded from above.
+            // One-time migration of the old global last-success into per-platform.
+            // Read the legacy enabled-state straight from UserDefaults by raw key
+            // (those typed fields are gone; this only runs for pre-provider state).
             var seed: [String: Date] = [:]
-            let glHost = d.string(forKey: DKey.gitlabHost) ?? "gitlabdev.paciolan.info"
-            let ghOrg  = d.string(forKey: DKey.githubOrg) ?? "Paciolan"
-            let bbWs   = d.string(forKey: DKey.bitbucketWorkspace) ?? "paciolan"
-            if !d.bool(forKey: DKey.skipGitlab),    !glHost.isEmpty { seed["gitlab"] = legacy }
-            if !d.bool(forKey: DKey.skipGithub),    !ghOrg.isEmpty  { seed["github"] = legacy }
-            if !d.bool(forKey: DKey.skipBitbucket), !bbWs.isEmpty   { seed["bitbucket"] = legacy }
+            let glHost = d.string(forKey: "gitlabHost") ?? ""
+            let ghOrg  = d.string(forKey: "githubOrg") ?? ""
+            let bbWs   = d.string(forKey: "bitbucketWorkspace") ?? ""
+            if !d.bool(forKey: "skipGitlab"),    !glHost.isEmpty { seed["gitlab"] = legacy }
+            if !d.bool(forKey: "skipGithub"),    !ghOrg.isEmpty  { seed["github"] = legacy }
+            if !d.bool(forKey: "skipBitbucket"), !bbWs.isEmpty   { seed["bitbucket"] = legacy }
             self.lastSuccessByPlatform = seed
         } else {
             self.lastSuccessByPlatform = [:]
         }
         self.filterModeByPlatform = (d.dictionary(forKey: DKey.filterModeByPlatform) as? [String: String]) ?? [:]
         self.hasCompletedSetup  = d.bool(forKey: DKey.hasCompletedSetup)
-        self.githubToken        = Keychain.get(KKey.githubToken) ?? ""
-        self.gitlabToken        = Keychain.get(KKey.gitlabToken) ?? ""
-        self.bitbucketAppPassword = Keychain.get(KKey.bitbucketPassword) ?? ""
     }
 
     // Build the SyncSettings the engine consumes: the shared run config in the

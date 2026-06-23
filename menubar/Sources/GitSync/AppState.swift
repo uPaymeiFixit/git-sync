@@ -34,7 +34,7 @@ final class AppState: ObservableObject {
         settings: settingsStore.currentSyncSettings,
         sink: BufferSink(buffer: eventBuffer)
     )
-    private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore)
+    private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore, providers: providers)
 
     init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore, providers: ProviderStore) {
         self.settingsStore = settings

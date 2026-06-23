@@ -91,6 +91,19 @@ final class ProviderStore: ObservableObject {
 
     var isConfigured: Bool { !enabledProviders.isEmpty }
 
+    // The distinct platform kinds among enabled, configured providers. The
+    // scheduler dedup-keys per Platform (lastSuccessByPlatform, startRun(only:)),
+    // so two enabled providers of the same kind collapse to one platform here.
+    var enabledPlatforms: [Platform] {
+        var seen = Set<Platform>()
+        var out: [Platform] = []
+        for p in enabledProviders {
+            guard let plat = Platform(rawValue: p.kind.rawValue) else { continue }
+            if seen.insert(plat).inserted { out.append(plat) }
+        }
+        return out
+    }
+
     // ---- Validation (the dangerous-corner guard) ---------------------
 
     struct ProviderValidation {

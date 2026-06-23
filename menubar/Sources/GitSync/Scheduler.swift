@@ -34,6 +34,7 @@ import AppKit
 final class Scheduler {
     private weak var state: AppState?
     private let settings: SettingsStore
+    private let providers: ProviderStore
     private var activity: NSBackgroundActivityScheduler?
     private var wakeObserver: NSObjectProtocol?
 
@@ -42,9 +43,10 @@ final class Scheduler {
     // min keeps a daily/every-N-hours schedule punctual without busy-work.
     private static let heartbeat: TimeInterval = 30 * 60
 
-    init(state: AppState, settings: SettingsStore) {
+    init(state: AppState, settings: SettingsStore, providers: ProviderStore) {
         self.state = state
         self.settings = settings
+        self.providers = providers
         start()
     }
 
@@ -119,7 +121,7 @@ final class Scheduler {
     func duePlatforms(asOf now: Date) -> Set<Platform> {
         guard let due = mostRecentExpectedFire(asOf: now) else { return [] }
         var out = Set<Platform>()
-        for p in settings.enabledPlatforms {
+        for p in providers.enabledPlatforms {
             let last = settings.lastSuccess(platform: p.rawValue)
             if last == nil || last! < due { out.insert(p) }
         }
@@ -141,9 +143,10 @@ final class Scheduler {
             return nil
         case .everyNHours:
             let hours = TimeInterval(max(1, settings.scheduleHours) * 3600)
-            let successes = settings.enabledPlatforms.compactMap { settings.lastSuccess(platform: $0.rawValue) }
+            let enabled = providers.enabledPlatforms
+            let successes = enabled.compactMap { settings.lastSuccess(platform: $0.rawValue) }
             // If any enabled platform has never synced, something is due now.
-            guard successes.count == settings.enabledPlatforms.count, let oldest = successes.min() else {
+            guard successes.count == enabled.count, let oldest = successes.min() else {
                 return now
             }
             let next = oldest.addingTimeInterval(hours)
@@ -168,7 +171,7 @@ final class Scheduler {
             return nil
         case .everyNHours:
             let hours = TimeInterval(max(1, settings.scheduleHours) * 3600)
-            let successes = settings.enabledPlatforms.compactMap { settings.lastSuccess(platform: $0.rawValue) }
+            let successes = providers.enabledPlatforms.compactMap { settings.lastSuccess(platform: $0.rawValue) }
             let base = successes.min() ?? now
             let next = base.addingTimeInterval(hours)
             return next > now ? next : now
