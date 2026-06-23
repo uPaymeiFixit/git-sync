@@ -137,25 +137,7 @@ private struct ScheduleTab: View {
 
 // MARK: - Field primitives
 
-// Wraps an inverted Skip* toggle into an "Enabled" checkbox. The wire
-// format (env var) stays as GIT_SYNC_SKIP_X=1 so the Python scripts
-// don't have to change; the UI just shows the user the opposite.
-struct EnabledCheckbox: View {
-    @Binding var skipBinding: Bool
-    let label: String
-
-    var body: some View {
-        Toggle(label, isOn: Binding(
-            get: { !skipBinding },
-            set: { skipBinding = !$0 }
-        ))
-        .toggleStyle(.checkbox)
-    }
-}
-
-// Per-platform sync scope: sync everything (default) vs. only repos the user
-// has tracked (whitelist). Routed through AppState.setFilterMode so flipping
-// to whitelist auto-tracks what's already on disk.
+// A labeled text field used across the Settings tabs.
 struct LabeledField: View {
     let label: String
     @Binding var value: String

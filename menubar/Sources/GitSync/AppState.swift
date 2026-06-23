@@ -361,14 +361,11 @@ final class AppState: ObservableObject {
             activeWorkers[platform, default: [:]][rel] = WorkerView(
                 op: op, phase: "starting", pct: nil, startedAt: Date()
             )
-        case .workerPhase(let platform, let rel, let phase, let pct):
-            // Buffer normally coalesces these into batch.latestPhases, but
-            // applying defensively here too is cheap.
-            if var w = activeWorkers[platform]?[rel] {
-                w.phase = phase
-                w.pct = pct
-                activeWorkers[platform, default: [:]][rel] = w
-            }
+        case .workerPhase:
+            // Unreachable here: EventBuffer.push always coalesces .workerPhase
+            // into batch.latestPhases (never batch.events), and apply(_:Batch)
+            // applies those directly. Kept only for switch exhaustiveness.
+            break
         case .workerFinish(let platform, let rel):
             activeWorkers[platform]?[rel] = nil
             if activeWorkers[platform]?.isEmpty == true {

@@ -120,11 +120,12 @@ final class SettingsStore: ObservableObject {
     @Published var filterModeByPlatform: [String: String] {
         didSet { UserDefaults.standard.set(filterModeByPlatform, forKey: DKey.filterModeByPlatform) }
     }
+    // Read-only legacy fallback: the per-platform filter mode for un-migrated
+    // inventory rows (those with no providerID). Live filter-mode writes go
+    // through ProviderStore.setFilterMode(providerID:); nothing writes
+    // filterModeByPlatform anymore, so there's no setter here.
     func filterMode(platform: String) -> FilterMode {
         FilterMode(rawValue: filterModeByPlatform[platform] ?? "") ?? .syncAll
-    }
-    func setFilterMode(_ mode: FilterMode, platform: String) {
-        filterModeByPlatform[platform] = mode.rawValue
     }
 
     // Platforms that are configured AND not skipped — mirrors the engine's

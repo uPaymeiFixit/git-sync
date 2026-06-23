@@ -122,7 +122,7 @@ actor SyncEngine {
     // filtering, fan-out, stale-scan) keys off this so the run loop is
     // provider-uniform — no special-casing per platform.
     private struct RunUnit {
-        let providerID: String          // "" for the synthesized legacy units
+        let providerID: String          // the parent Provider's UUID string
         let kind: Platform
         let title: String
         let client: PlatformDiscovery
@@ -259,9 +259,9 @@ actor SyncEngine {
             let excluded: Bool   // whitelist miss → silently omitted, no outcome
         }
         var jobs: [Job] = []
-        // Keyed by providerID (or "platform#" for legacy units, which have "").
+        // Keyed by providerID (the provider's UUID string; runUnits always sets it).
         var complete: [String: Bool] = [:]
-        func key(_ u: RunUnit) -> String { u.providerID.isEmpty ? "p:" + u.kind.rawValue : u.providerID }
+        func key(_ u: RunUnit) -> String { u.providerID }
 
         for unit in units {
             if aborted { break }
