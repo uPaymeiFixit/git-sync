@@ -1,18 +1,14 @@
 import Foundation
 import SwiftUI
 
-// Backing store for the Settings window. Non-secrets live in UserDefaults;
-// the GitHub PAT and Bitbucket app password live in Keychain via the
-// Keychain.swift wrapper.
+// Backing store for the Settings window. Holds the SHARED run config (syncRoot,
+// parallel, timeout, depth, schedule) in UserDefaults. AppState calls
+// `currentSyncSettings` at the start of each run to build the GIT_SYNC_* env
+// dict the engine passes to its git subprocesses.
 //
-// SettingsStore is the single source of truth for the env vars that get
-// passed to the child sync scripts. AppState calls `currentSyncSettings`
-// at the start of each run to build the env dict.
-//
-// Note: the scripts directory and Python interpreter path are NOT user-
-// settable — they're baked into the app bundle (and `/usr/bin/python3`
-// is required on macOS 14+). Users don't manage their own copy of the
-// sync engine, the same way iMovie users don't manage ffmpeg.
+// Per-provider host/scope/token/skip config lives on ProviderStore (+ Keychain
+// for secrets), NOT here — this store predates the provider model and keeps
+// only the cross-provider settings.
 
 @MainActor
 final class SettingsStore: ObservableObject {
@@ -149,10 +145,9 @@ final class SettingsStore: ObservableObject {
     }
 
     // Build the SyncSettings the engine consumes: the shared run config in the
-    // environment dict, with per-provider connection/credentials attached later
+    // environment dict. Per-provider connection/credentials are attached later
     // by AppState.withTrackingEnv (which alone has the provider + inventory
-    // stores). The singular GITLAB_HOST / token / skip env vars the Python used
-    // are gone — that config now lives on each Provider.
+    // stores).
     var currentSyncSettings: SyncSettings {
         // Start from the inherited process environment, then overlay our
         // GIT_SYNC_* config. The git children inherit this env wholesale, so it

@@ -1,14 +1,13 @@
 import Foundation
 
-// Parses lines from a sync-{platform}.py child process (run with
-// GIT_SYNC_EVENTS=1) into SyncEvent values. Event lines start with the
-// EVENTS_PREFIX from scripts/_sync.py:165 — ASCII record separator + "GSE ".
-// Anything else is treated as free-form log output and returned as nil.
+// Parses a line of the "\x1eGSE <json>" event wire format into a SyncEvent.
+// The live engine emits SyncEvents directly (it does not go through this
+// parser); this exists for the --verify-parser test harness, which validates
+// the wire format against a fixture, and as the decoder if event lines are
+// ever piped in. A line without the prefix is free-form log output → nil.
 //
-// Defensive: if the prefix is present but the JSON fails to decode, we
-// return .logLine instead of throwing — the script controls all call sites
-// so this should never happen in practice, but a corrupt event line should
-// not break the app.
+// Defensive: if the prefix is present but the JSON fails to decode, we return
+// .logLine instead of throwing, so a corrupt line can't break the app.
 
 enum ParsedLine: Equatable, Sendable {
     case event(SyncEvent)
@@ -16,8 +15,7 @@ enum ParsedLine: Equatable, Sendable {
 }
 
 struct EventParser {
-    // Matches EVENTS_PREFIX in scripts/_sync.py: \x1e + "GSE " (with the
-    // trailing space). The Python uses `"\x1eGSE "` exactly.
+    // Event-line marker: ASCII record separator (\x1e) + "GSE " (trailing space).
     static let prefix = "\u{1E}GSE "
 
     let platform: String
@@ -79,9 +77,8 @@ private struct EventEnvelope: Decodable {
             return .workerFinish(platform: platform, rel: p.rel)
         case "outcome":
             let o = try decoder.decode(Outcome.self, from: data)
-            // Outcome's wire envelope carries platform natively (Python's
-            // _emit_outcome_event added the field). Trust that over the
-            // pipe-attribution fallback when present.
+            // The Outcome carries its own platform; trust that when present,
+            // else fall back to this parser's configured platform.
             return .outcome(platform: o.platform.isEmpty ? platform : o.platform,
                             outcome: o)
         case "remote_project":
@@ -112,7 +109,7 @@ private struct RemoteProjectPayload: Decodable {
     let rel: String
     let sshURL: String
     let defaultBranch: String
-    let providerID: String?     // native engine only; Python path omits it
+    let providerID: String?     // optional in the wire format (older lines omit it)
 
     enum CodingKeys: String, CodingKey {
         case platform, rel

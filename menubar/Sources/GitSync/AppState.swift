@@ -152,8 +152,8 @@ final class AppState: ObservableObject {
 
     // A repo's on-disk folder = its provider's localPath + provider-local rel.
     // Falls back to syncRoot/<DefaultDir> for rows whose providerID doesn't
-    // match a configured provider (pre-migration / legacy / Python path), where
-    // rel may still carry the platform-dir prefix.
+    // match a configured provider (pre-migration / legacy rows), where rel may
+    // still carry the platform-dir prefix.
     func diskPath(for id: RepoID) -> URL? {
         if let p = providers.provider(id: UUID(uuidString: id.providerID) ?? UUID()) {
             return URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)

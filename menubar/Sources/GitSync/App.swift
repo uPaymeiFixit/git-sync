@@ -243,10 +243,9 @@ struct GitSyncApp: App {
         }
     }
 
-    // Quit-while-running cleanup. Without this, the .app's process exits
-    // and macOS reaps the Python children with SIGTERM — usually fine, but
-    // a child mid-clone can leave a .git/*.lock behind. We send a polite
-    // SIGTERM ourselves so the scripts' own SIGINT handler runs first.
+    // Quit-while-running cleanup: cancel the in-process sync engine on app
+    // termination (engine.cancel() via cancelRun()) so a git op interrupted by
+    // quit doesn't leave a .git/*.lock behind for the next run to trip over.
     private func installTerminationGuard() {
         let appState = state
         NotificationCenter.default.addObserver(

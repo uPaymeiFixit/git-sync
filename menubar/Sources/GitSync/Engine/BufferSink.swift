@@ -1,10 +1,8 @@
 import Foundation
 
-// Adapter: lets the native SyncEngine feed the existing EventBuffer, which
-// AppState already drains at 10Hz into @Published state. This is the seam
-// that keeps every downstream invariant (two-lane bookkeeping, finalizeRun,
-// coalescing) byte-for-byte unchanged — only the event PRODUCER changes from
-// the Python+pipe to the in-process engine.
+// Adapter: the SyncEngine's EngineSink that feeds the EventBuffer, which
+// AppState drains at 10Hz into @Published state. This seam is what lets the
+// engine reuse the buffer's two-lane bookkeeping / finalizeRun / coalescing.
 struct BufferSink: EngineSink {
     let buffer: EventBuffer
 

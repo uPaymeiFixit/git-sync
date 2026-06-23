@@ -11,7 +11,7 @@ import Foundation
 // `platform` is the API DIALECT / display kind ("gitlab"/"github"/"bitbucket")
 // — NOT part of identity (two providers can share a kind). It's retained for
 // display, skip/whitelist dialect, and as a fallback identity component for
-// rows whose providerID isn't known yet (pre-migration / Python path).
+// rows whose providerID isn't known yet (pre-migration / legacy).
 //
 // Back-compat: older inventory.json keyed by {platform, "Gitlab/foo"} decodes
 // with providerID == "" and the prefixed rel intact; InventoryStore's one-time

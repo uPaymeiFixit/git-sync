@@ -138,16 +138,8 @@ final class InventoryStore: ObservableObject {
         if changed { scheduleSave() }
     }
 
-    // The tracked repos for a platform, as rels — for the legacy Python path
-    // (single provider per kind). Empty set = nothing tracked yet.
-    func trackedRels(platform: String) -> [String] {
-        repos.values
-            .filter { $0.id.platform == platform && $0.isTracked }
-            .map { $0.id.rel }
-    }
-
     // The tracked repos for a provider, as provider-local rels — handed to the
-    // native engine so it knows which repos to sync in trackedOnly mode.
+    // engine so it knows which repos to sync in trackedOnly mode.
     func trackedRels(providerID: String) -> [String] {
         repos.values
             .filter { $0.id.providerID == providerID && $0.isTracked }

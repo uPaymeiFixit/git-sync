@@ -1,11 +1,9 @@
 import Foundation
 
-// Faithful Swift port of scripts/_sync.py's clone_or_update /
-// _clone_or_update_inner — the data-safety-critical decision tree. Every
-// branch here mirrors the Python; the differential test (diff-fixtures.py
-// oracle vs the --diff-engine mode) is the proof that they agree on every
-// status. DO NOT "improve" the branch logic without re-running the diff —
-// a wrong branch can clobber a user's uncommitted work.
+// The data-safety-critical clone-or-update decision tree (a faithful port of
+// the original `_sync.py` clone_or_update). DO NOT "improve" the branch logic
+// casually — a wrong branch can clobber a user's uncommitted work; the rules
+// for when it's safe to fetch/fast-forward vs. report dirty/diverged are exact.
 //
 // This is a pure, synchronous function over GitContext so it's trivially
 // testable. The engine calls it from a worker task; concurrency, SSH

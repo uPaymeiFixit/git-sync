@@ -210,9 +210,9 @@ actor SyncEngine {
 
     // Runs one repo's clone_or_update OFF the actor (nonisolated static).
     // This is the unit the TaskGroup parallelizes.
-    // `destRoot` is the folder the repo clones into (the provider's localPath,
-    // or syncRoot/<Dir> on the legacy path); `rel` is provider-local. The
-    // emitted outcome carries `providerID` so the inventory keys it correctly.
+    // `destRoot` is the folder the repo clones into (the provider's localPath);
+    // `rel` is provider-local. The emitted outcome carries `providerID` so the
+    // inventory keys it correctly.
     nonisolated static func syncOne(
         cfg: WorkConfig, mux: SSHMultiplexer, providerID: String, platform: String,
         rel: String, destRoot: URL, sshURL: String, branch: String,

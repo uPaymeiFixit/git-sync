@@ -1,12 +1,12 @@
 import Foundation
 import SwiftUI
 
-// Mirrors scripts/_sync.py Status enum. Wire values must stay in sync with
-// the Python side; see scripts/_sync.py:418.
+// The per-repo sync status produced by the engine. The raw values are the
+// persisted wire format (history + inventory JSON), so don't rename them.
 //
-// `notClonedYet` is synthetic — never emitted by the Python. The
-// InventoryStore uses it for repos the API knows about but that we
-// don't have a local clone of yet.
+// `notClonedYet` / `notSyncedYet` are synthetic — never produced by a real
+// sync; the InventoryStore uses them for display (API knows the repo but it's
+// not cloned yet / on disk but never synced).
 enum SyncStatus: String, Codable, CaseIterable, Sendable {
     case cloned        = "cloned"
     case updated       = "updated"

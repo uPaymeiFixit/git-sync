@@ -1,12 +1,9 @@
 import Foundation
 
-// Mirrors scripts/_sync.py Outcome dataclass. Wire format uses snake_case
-// keys (see _emit_outcome_event in scripts/_sync.py:444).
-//
-// `platform` is added by the Python side (OutcomeCollector now carries
-// the platform name) so the menu-bar app can key by (platform, rel)
-// without needing pipe-attribution. Default empty for back-compat with
-// older history JSON that predates the field.
+// The result of syncing one repo, produced by the engine (RepoSyncer / StaleScan)
+// and persisted in run history. Codable with snake_case wire keys (see
+// CodingKeys) so older history JSON still decodes. `platform` defaults to empty
+// for back-compat with history that predates the field.
 struct Outcome: Codable, Hashable, Identifiable, Sendable {
     let platform: String
     let rel: String
@@ -16,8 +13,8 @@ struct Outcome: Codable, Hashable, Identifiable, Sendable {
     let oldSha: String
     let newSha: String
     let commitsAhead: Int
-    // Which provider produced this. Native-engine-only (the Python path leaves
-    // it ""); the engine stamps it so the inventory can key the row by provider.
+    // Which provider produced this; the engine stamps it so the inventory can
+    // key the row by provider. Empty for old history rows that predate it.
     let providerID: String
 
     var id: String { "\(providerID)\u{1F}\(platform)\u{1F}\(rel)" }

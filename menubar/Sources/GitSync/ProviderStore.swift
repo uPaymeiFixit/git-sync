@@ -241,8 +241,8 @@ final class ProviderStore: ObservableObject {
     // platform; they're now per-provider. Seed each provider's skipPatterns
     // from that global list ONCE so existing users keep their skips. Runs after
     // the provider migration (so providers exist) and only if a provider hasn't
-    // already got its own patterns. The global key stays in UserDefaults for
-    // the legacy Python/no-providers fallback.
+    // already got its own patterns. The global key stays in UserDefaults only
+    // as the migration source.
     private func migrateGlobalSkipIfNeeded() {
         let d = UserDefaults.standard
         guard !d.bool(forKey: skipMigratedKey) else { return }
