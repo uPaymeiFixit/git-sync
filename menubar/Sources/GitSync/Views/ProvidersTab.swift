@@ -24,14 +24,30 @@ struct ProvidersTab: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                // Single-click selection is handled natively by List(selection:).
+                // The earlier `.onTapGesture(count: 2)` REPLACED the List's own
+                // click recognizer, which made both selection and double-click
+                // fire unreliably ("sometimes it selects, sometimes it doesn't").
+                // `.simultaneousGesture` runs ALONGSIDE the List's recognizer
+                // instead of competing with it, so single-click selection stays
+                // native and double-click reliably opens that row. The row also
+                // fills the full width so the whole row is a hit target.
                 List(selection: $selection) {
                     ForEach(providers.providers) { p in
                         ProviderRow(provider: p)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                             .tag(p.id)
-                            // Double-click is the familiar shortcut for "edit
-                            // the selected row" (Finder, list-based prefs);
-                            // single-click just selects, the pencil edits.
-                            .onTapGesture(count: 2) { startEdit(p) }
+                            .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                startEdit(p)
+                            })
+                            .contextMenu {
+                                Button("Edit…") { startEdit(p) }
+                                Button("Remove", role: .destructive) {
+                                    providers.remove(id: p.id)
+                                    if selection == p.id { selection = nil }
+                                }
+                            }
                     }
                 }
                 .listStyle(.inset(alternatesRowBackgrounds: true))
