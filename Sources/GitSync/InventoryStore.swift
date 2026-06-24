@@ -71,15 +71,17 @@ final class InventoryStore: ObservableObject {
         repo.lastNewSha = outcome.newSha
         repo.lastCommitsAhead = outcome.commitsAhead
         repo.lastUpdatedAt = Date()
-        // Any non-stale, non-skipped status implies we have it locally.
+        // Statuses that prove the repo is present on disk → mark it cloned.
         switch outcome.status {
         case .cloned, .updated, .updatedDirty, .upToDate, .emptyRemote,
-             .dirty, .diverged, .branchMissing, .untracked, .trackedGone:
+             .dirty, .diverged, .branchMissing, .untracked, .trackedGone,
+             .staleOnDisk, .nonGitDir:
             // .untracked / .trackedGone are emitted for on-disk repos in
-            // whitelist mode → they ARE cloned locally.
+            // whitelist mode; .staleOnDisk / .nonGitDir come from the disk-walk
+            // stale scan — all of these ARE on disk locally (and so are
+            // trashable from the Repositories view).
             repo.isClonedLocally = true
-        case .staleOnDisk, .nonGitDir, .skipped, .error, .notClonedYet,
-             .notSyncedYet:
+        case .skipped, .error, .notClonedYet, .notSyncedYet:
             break
         }
         repos[id] = repo
@@ -231,6 +233,20 @@ final class InventoryStore: ObservableObject {
             for repo in stored { repos[repo.id] = repo }
         }
         migrateToProviders(rawData: data)
+        repairClonedFlag()
+    }
+
+    // Repair persisted rows whose status proves they're on disk but that were
+    // saved with isClonedLocally == false (an earlier apply(outcome:) didn't set
+    // the flag for .staleOnDisk / .nonGitDir). Without this they'd be excluded
+    // from the Repositories view's "Move N to Trash" count until the next sync
+    // re-emitted the outcome. Idempotent; in-memory only (next save persists it).
+    private func repairClonedFlag() {
+        for (id, repo) in repos where !repo.isClonedLocally {
+            if repo.lastStatus == .staleOnDisk || repo.lastStatus == .nonGitDir {
+                repos[id]?.isClonedLocally = true
+            }
+        }
     }
 
     // One-time migration to provider-keyed identity. Pre-provider rows decode
