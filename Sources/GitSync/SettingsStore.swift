@@ -107,9 +107,9 @@ final class SettingsStore: ObservableObject {
         let d = UserDefaults.standard
         let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-        // Paciolan-flavored default for the sync root. Per-provider host/scope/
-        // token now live on ProviderStore (seeded once by its legacy migration).
-        self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git/Paciolan"
+        // Default base for new provider folders. Per-provider host/scope/token
+        // live on ProviderStore (seeded once by its legacy migration).
+        self.syncRoot           = d.string(forKey: DKey.syncRoot) ?? "\(home)/git"
         self.skipPatterns       = d.string(forKey: DKey.skipPatterns) ?? ""
         self.parallel           = d.object(forKey: DKey.parallel) as? Int ?? 128
         self.timeout            = d.object(forKey: DKey.timeout) as? Int ?? 1800

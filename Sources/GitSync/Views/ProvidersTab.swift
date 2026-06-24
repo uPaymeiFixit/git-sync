@@ -141,7 +141,7 @@ private struct ProviderEditor: View {
         VStack(spacing: 0) {
             Form {
                 Section {
-                    LabeledField(label: "Name", value: $draft.name, prompt: "Paciolan GitLab")
+                    LabeledField(label: "Name", value: $draft.name, prompt: "Work GitLab")
                     Picker("Kind", selection: $draft.kind) {
                         ForEach(ProviderKind.allCases, id: \.self) { Text($0.titleName).tag($0) }
                     }

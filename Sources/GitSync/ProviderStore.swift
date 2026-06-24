@@ -192,7 +192,7 @@ final class ProviderStore: ObservableObject {
         guard !d.bool(forKey: migratedKey) else { return }
         guard providers.isEmpty else { d.set(true, forKey: migratedKey); return }
 
-        let syncRoot = d.string(forKey: "syncRoot") ?? "\(NSHomeDirectory())/git/Paciolan"
+        let syncRoot = d.string(forKey: "syncRoot") ?? "\(NSHomeDirectory())/git"
         func path(_ dir: String) -> String { (syncRoot as NSString).appendingPathComponent(dir) }
         func mode(_ key: String) -> FilterMode {
             FilterMode(rawValue: (d.dictionary(forKey: "filterModeByPlatform") as? [String: String])?[key] ?? "") ?? .syncAll

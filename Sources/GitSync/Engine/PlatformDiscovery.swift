@@ -95,7 +95,7 @@ struct SkipMatcher: Sendable {
 
 struct GitLabClient: PlatformDiscovery {
     let platform = Platform.gitlab
-    let host: String           // e.g. "gitlabdev.paciolan.info" (no scheme)
+    let host: String           // e.g. "gitlab.example.com" (no scheme)
     let token: String          // PRIVATE-TOKEN
     let includeArchived: Bool
     let syncRoot: URL

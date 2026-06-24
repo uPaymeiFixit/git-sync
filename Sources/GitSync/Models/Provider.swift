@@ -64,7 +64,7 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable {
 struct Provider: Identifiable, Codable, Sendable, Hashable {
     let id: UUID
     var kind: ProviderKind
-    var name: String           // user label, e.g. "Paciolan GitLab"
+    var name: String           // user label, e.g. "Work GitLab"
     var enabled: Bool
 
     // Connection. `host` is meaningful for GitLab (the instance host) and is
