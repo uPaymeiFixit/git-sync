@@ -346,7 +346,7 @@ private struct RepoRow: View {
                 .frame(width: 130, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(repo.id.rel)
+                    Text(boldedLeafPath)
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -440,6 +440,24 @@ private struct RepoRow: View {
         .background(repo.effectiveStatus.color.opacity(0.15))
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .help(repo.effectiveStatus.explanation)
+    }
+
+    // The full repo path with only its leaf (the repo name itself) bolded, e.g.
+    // development/.../event-list/**next-event-list**. Kept as one AttributedString
+    // in a single Text so lineLimit(1)/truncationMode(.middle) still apply to the
+    // path as a whole.
+    private var boldedLeafPath: AttributedString {
+        var attributed = AttributedString(repo.id.rel)
+        if let slash = repo.id.rel.lastIndex(of: "/") {
+            let leafStart = repo.id.rel.index(after: slash)
+            if let lower = AttributedString.Index(leafStart, within: attributed) {
+                attributed[lower...].font = .system(.body, design: .monospaced).weight(.bold)
+            }
+        } else {
+            // No slash: the whole rel is the repo name — bold all of it.
+            attributed.font = .system(.body, design: .monospaced).weight(.bold)
+        }
+        return attributed
     }
 
     private var syncButtonHelp: String {
