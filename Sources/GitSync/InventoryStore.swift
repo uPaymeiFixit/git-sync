@@ -236,17 +236,40 @@ final class InventoryStore: ObservableObject {
         repairClonedFlag()
     }
 
-    // Repair persisted rows whose status proves they're on disk but that were
-    // saved with isClonedLocally == false (an earlier apply(outcome:) didn't set
-    // the flag for .staleOnDisk / .nonGitDir). Without this they'd be excluded
-    // from the Repositories view's "Move N to Trash" count until the next sync
-    // re-emitted the outcome. Idempotent; in-memory only (next save persists it).
+    // Reconcile isClonedLocally for on-disk-implying statuses (.staleOnDisk /
+    // .nonGitDir) against the ACTUAL filesystem at launch. Both statuses mean
+    // "found on disk by the stale scan", but a row can outlive the folder — e.g.
+    // the repo was trashed but inventory.remove() didn't run/persist (a failed
+    // delete leaves a zombie row). Trusting the status blindly produced the
+    // contradiction "status: stale-on-disk" + trasher "not on disk".
+    //
+    // So: check the resolved path. If the folder exists, set isClonedLocally =
+    // true (fixes the under-count in "Move N to Trash"). If it's gone, drop the
+    // zombie row — the repo isn't on disk and the remote already dropped it, so
+    // there's nothing to show. Idempotent; in-memory (next save persists it).
     private func repairClonedFlag() {
-        for (id, repo) in repos where !repo.isClonedLocally {
-            if repo.lastStatus == .staleOnDisk || repo.lastStatus == .nonGitDir {
+        for (id, repo) in repos
+        where repo.lastStatus == .staleOnDisk || repo.lastStatus == .nonGitDir {
+            let onDisk = diskURL(for: id).map {
+                FileManager.default.fileExists(atPath: $0.path)
+            } ?? repo.isClonedLocally   // unresolvable provider → leave as-is
+            if onDisk {
                 repos[id]?.isClonedLocally = true
+            } else {
+                repos[id] = nil          // zombie: folder gone, drop the row
             }
         }
+    }
+
+    // Resolve a row's on-disk folder via its provider's localPath + rel, using
+    // the providers captured at launch. nil if no matching provider (e.g. a
+    // legacy/unmigrated row) — caller decides the fallback. Mirrors the
+    // provider.resolvedLocalPath + rel mapping seedFromDisk uses.
+    private func diskURL(for id: RepoID) -> URL? {
+        guard let p = providersAtLaunch.first(where: { $0.id.uuidString == id.providerID })
+        else { return nil }
+        return URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)
+            .appendingPathComponent(id.rel)
     }
 
     // One-time migration to provider-keyed identity. Pre-provider rows decode

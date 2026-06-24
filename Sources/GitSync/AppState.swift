@@ -145,6 +145,12 @@ final class AppState: ObservableObject {
                 inventory.remove(id)
             }
         }
+        // Self-heal: a row skipped as "not on disk" is a zombie (the inventory
+        // thinks it's present but the folder is gone — e.g. an earlier delete
+        // didn't persist). Drop it so it stops showing as trashable.
+        for entry in report.skipped where entry.reason == "not on disk" {
+            inventory.remove(entry.id)
+        }
         return report
     }
 
