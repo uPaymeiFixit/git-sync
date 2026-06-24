@@ -1,9 +1,9 @@
 import Foundation
 
-// The data-safety-critical clone-or-update decision tree (a faithful port of
-// the original `_sync.py` clone_or_update). DO NOT "improve" the branch logic
-// casually — a wrong branch can clobber a user's uncommitted work; the rules
-// for when it's safe to fetch/fast-forward vs. report dirty/diverged are exact.
+// The data-safety-critical clone-or-update decision tree. DO NOT "improve" the
+// branch logic casually — a wrong branch can clobber a user's uncommitted work;
+// the rules for when it's safe to fetch/fast-forward vs. report dirty/diverged
+// are exact and deliberate.
 //
 // This is a pure, synchronous function over GitContext so it's trivially
 // testable. The engine calls it from a worker task; concurrency, SSH
@@ -38,8 +38,7 @@ enum RepoSyncer {
     private static let staleLockAgeSecs: TimeInterval = 30
 
     // The entry point. `platform` and `rel` identify the repo; `dest` is the
-    // on-disk path (syncRoot/rel). Returns exactly one Outcome, like the
-    // Python which adds exactly one.
+    // on-disk path. Returns exactly one Outcome per repo.
     static func cloneOrUpdate(
         platform: String,
         rel: String,
@@ -295,8 +294,7 @@ enum RepoSyncer {
     private static func safeUnderRoot(_ dest: URL, _ root: URL) -> Bool {
         // dest may not exist yet (clone path), so resolvingSymlinksInPath on
         // it is unreliable. Resolve the deepest EXISTING ancestor for symlink
-        // safety, then re-append the non-existent tail — equivalent in intent
-        // to Python's dest.resolve().relative_to(SYNC_ROOT.resolve()).
+        // safety, then re-append the non-existent tail, and check containment.
         let r = root.standardizedFileURL.resolvingSymlinksInPath().path
         let d = resolvedExistingPrefix(dest).path
         return d == r || d.hasPrefix(r + "/")
@@ -320,9 +318,8 @@ enum RepoSyncer {
     }
 
     private static func tail(_ s: String, _ n: Int = 20) -> String {
-        // Python's _tail uses str.splitlines() (splits on \n, \r, \r\n, …).
-        // Our captured output is already \r/\n-split and re-joined with \n,
-        // but split on both here too so a residual \r can't merge lines.
+        // Split on both \n and \r (captured output is \n-joined, but split on
+        // both so a residual \r can't merge lines).
         let lines = s.split(omittingEmptySubsequences: false) { $0 == "\n" || $0 == "\r" }
         return lines.suffix(n).joined(separator: "\n")
     }

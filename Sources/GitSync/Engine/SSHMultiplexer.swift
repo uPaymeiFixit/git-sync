@@ -1,8 +1,8 @@
 import Foundation
 
-// Faithful port of the SSH ControlMaster machinery in scripts/_sync.py.
-// This is NOT optional: prewarming N masters per host before the worker
-// pool fans out takes a full run from ~40min to ~2min. Without prewarming,
+// SSH ControlMaster machinery. This is NOT optional: prewarming N masters per
+// host before the worker pool fans out takes a full run from ~40min to ~2min.
+// Without prewarming,
 // the first burst of parallel workers all race to open the master at once,
 // which defeats multiplexing AND trips sshd's MaxStartups/MaxSessions
 // limits — the 40-minute pathology.
@@ -29,8 +29,8 @@ struct SSHMultiplexer: Sendable {
         self.mastersPerHost = enabled ? max(1, Int((Double(self.parallel) / 8.0).rounded(.up))) : 1
     }
 
-    // Stable shard for a repo path → the master that retries reuse. Port of
-    // _shard_for. Uses a stable FNV-1a hash (Swift's Hasher is seeded per
+    // Stable shard for a repo path → the master that retries reuse. Uses a
+    // stable FNV-1a hash (Swift's Hasher is seeded per
     // process and would still be stable within a run, but FNV keeps it
     // deterministic and dependency-free).
     func shard(for rel: String) -> Int {
@@ -42,16 +42,15 @@ struct SSHMultiplexer: Sendable {
         return Int(hash % UInt64(mastersPerHost))
     }
 
-    // ControlPath for a shard. Port of _control_path: collapse the s<N>-
-    // prefix when there's only one master so layouts are easy to eyeball.
+    // ControlPath for a shard. Collapse the s<N>- prefix when there's only one
+    // master so layouts are easy to eyeball.
     func controlPath(shard: Int) -> String {
         if mastersPerHost <= 1 { return "\(controlDir.path)/%C" }
         return "\(controlDir.path)/s\(shard)-%C"
     }
 
-    // The GIT_SSH_COMMAND a worker uses. Port of _ssh_command for a fixed
-    // shard (the engine pins each worker to its shard, rather than the
-    // Python's thread-local).
+    // The GIT_SSH_COMMAND a worker uses, for a fixed shard (each worker is
+    // pinned to its shard).
     func sshCommand(shard: Int) -> String {
         var parts = ["ssh", Self.timeoutOpts]
         if enabled {
@@ -60,8 +59,8 @@ struct SSHMultiplexer: Sendable {
         return parts.joined(separator: " ")
     }
 
-    // Pull the set of user@host pairs out of the job SSH URLs. Port of
-    // _unique_ssh_hosts. Matches scp-style "user@host:path".
+    // Pull the set of user@host pairs out of the job SSH URLs. Matches
+    // scp-style "user@host:path".
     static func uniqueHosts(_ sshURLs: [String]) -> Set<String> {
         var hosts = Set<String>()
         let re = try! NSRegularExpression(pattern: #"^(?:([^@:/]+)@)?([^:/]+):"#)
@@ -76,9 +75,9 @@ struct SSHMultiplexer: Sendable {
         return hosts
     }
 
-    // Prewarm MASTERS_PER_HOST connections for each host, in parallel,
-    // BEFORE the worker pool fires. Port of prewarm_ssh_masters. Returns the
-    // (host, shard) pairs actually attempted so cleanup can close them.
+    // Prewarm mastersPerHost connections for each host, in parallel, BEFORE the
+    // worker pool fires. Returns the (host, shard) pairs actually attempted so
+    // cleanup can close them.
     @discardableResult
     func prewarm(hosts: Set<String>) -> [(host: String, shard: Int)] {
         guard enabled, !hosts.isEmpty else { return [] }
@@ -127,9 +126,8 @@ struct SSHMultiplexer: Sendable {
         return pairs
     }
 
-    // Close every master we opened and remove the socket dir. Port of
-    // _cleanup_ssh_masters. Without this the master ssh processes linger
-    // until ControlPersist (120s) expires.
+    // Close every master we opened and remove the socket dir. Without this the
+    // master ssh processes linger until ControlPersist (120s) expires.
     func cleanup(pairs: [(host: String, shard: Int)]) {
         guard enabled else { return }
         for pair in pairs {
@@ -140,9 +138,8 @@ struct SSHMultiplexer: Sendable {
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
             do { try p.run() } catch { continue }
-            // Bound the wait (Python uses timeout=5): a wedged control socket
-            // must not stall run completion, since cleanup runs in a defer on
-            // the run-finish path.
+            // Bound the wait (5s): a wedged control socket must not stall run
+            // completion, since cleanup runs in a defer on the run-finish path.
             let done = DispatchSemaphore(value: 0)
             DispatchQueue.global().async { p.waitUntilExit(); done.signal() }
             if done.wait(timeout: .now() + 5) == .timedOut, p.isRunning {

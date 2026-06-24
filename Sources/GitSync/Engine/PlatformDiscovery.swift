@@ -1,10 +1,9 @@
 import Foundation
 
-// Discovery layer for the native engine — ports the three sync-*.py mains'
-// API listing + _sync_only paths. Each client returns DiscoveredRepo rows
-// (remote-known projects) plus a `complete` flag mirroring Python's
-// discovery_complete (false ⇒ suppress the stale scan, since a partial
-// listing would flag every un-enumerated repo as deleted).
+// Discovery layer: each platform client lists the remote-known repos via its
+// REST API. Returns DiscoveredRepo rows plus a `complete` flag — false ⇒
+// the listing had errors, so the caller suppresses the stale scan (a partial
+// listing would otherwise flag every un-enumerated repo as deleted).
 
 struct DiscoveredRepo: Sendable {
     // Provider-local path, relative to the client's platformRoot (the provider's
@@ -73,8 +72,8 @@ func hostReachable(_ url: URL, timeout: TimeInterval = 8) -> Bool {
     return box.ok
 }
 
-// Port of matches_skip — comma-separated GIT_SYNC_SKIP patterns matched as
-// path prefixes against the platform-native namespace path (case-insensitive,
+// Comma-separated skip patterns matched as path prefixes against the
+// platform-native namespace path (case-insensitive,
 // like RepoActions.isInSkipList).
 struct SkipMatcher: Sendable {
     let patterns: [String]
@@ -212,7 +211,7 @@ enum HTTPClient {
 
     // Synchronous GET. Returns (httpStatus, body, linkHeader). Retries on
     // transient/network errors with exponential backoff; raises HTTPCodeError
-    // immediately on 401/403/404 (non-transient, like the Python).
+    // immediately on 401/403/404 (non-transient — retrying won't help).
     static func get(
         _ url: URL, headers: [String: String], accept: String,
         attempts: Int = 5, backoff: Double = 2.0
@@ -254,7 +253,7 @@ enum HTTPClient {
     }
 }
 
-// ---- GitHub: URLSession. Port of sync-github.py. ----
+// ---- GitHub: org repos via the REST API (URLSession). ----
 
 struct GitHubClient: PlatformDiscovery {
     let platform = Platform.github
@@ -318,7 +317,7 @@ struct GitHubClient: PlatformDiscovery {
         return DiscoveredRepo(rel: rel(dest), sshURL: ssh, defaultBranch: branch, namespacePath: repoName)
     }
 
-    // Port of _parse_next_link: <url>; rel="next"
+    // Parse the RFC 5988 Link header's rel="next" URL: <url>; rel="next"
     private func parseNextLink(_ header: String) -> URL? {
         guard !header.isEmpty,
               let r = header.range(of: #"<([^>]+)>;\s*rel="next""#, options: .regularExpression)
@@ -336,7 +335,7 @@ struct GitHubClient: PlatformDiscovery {
     }
 }
 
-// ---- Bitbucket: URLSession. Port of sync-bitbucket.py. ----
+// ---- Bitbucket: workspace repos via the 2.0 REST API (URLSession). ----
 
 struct BitbucketClient: PlatformDiscovery {
     let platform = Platform.bitbucket

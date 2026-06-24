@@ -1,7 +1,6 @@
 import Foundation
 
-// Port of scripts/_sync.py discover_extras — a single-pass walk of a
-// platform root that finds:
+// A single-pass walk of a platform root that finds:
 //   - stale-on-disk: a git repo whose path isn't in the expected set
 //   - non-git-dir:  a subtree with NO .git anywhere, reported at the
 //                   TOPMOST offending directory only
@@ -64,9 +63,7 @@ enum StaleScan {
         return results
     }
 
-    // Sorted immediate subdirectories, excluding symlinks and .git. Mirrors
-    // the Python's `sorted(p for p in dir.iterdir() if p.is_dir() and not
-    // p.is_symlink() and p.name != ".git")`.
+    // Sorted immediate subdirectories, excluding symlinks and .git.
     private static func childDirs(_ dir: URL, fm: FileManager) -> [URL] {
         guard let entries = try? fm.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],

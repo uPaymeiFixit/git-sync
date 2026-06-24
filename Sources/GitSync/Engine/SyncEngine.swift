@@ -1,8 +1,8 @@
 import Foundation
 import Synchronization
 
-// The sync engine. Drives git directly in Swift (no Python, no subprocess
-// pipe). Owns:
+// The sync engine. Runs git in-process (spawns git subprocesses directly; no
+// intermediate CLI). Owns:
 //   - the two-lane mutual-exclusion gate (full run exclusive; individual
 //     per-repo syncs run in parallel with each other)
 //   - discovery via the PlatformDiscovery clients

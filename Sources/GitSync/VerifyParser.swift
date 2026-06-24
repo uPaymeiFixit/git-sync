@@ -5,8 +5,8 @@ import Foundation
 // in place of XCTest because this project builds with the Command Line
 // Tools toolchain, which doesn't ship XCTest or swift-testing.
 //
-// Invoked via `./build.sh debug && .build/debug/GitSyncMenuBar --verify-parser`
-// or by passing --verify-parser to the .app's executable.
+// Invoked by passing --verify-parser to the built executable
+// (.build/release/GitSync.app/Contents/MacOS/GitSync --verify-parser).
 enum VerifyParser {
     // exit codes: 0 ok, 1 a check failed, 2 the fixture wasn't found
     static func run() -> Int32 {
@@ -86,12 +86,10 @@ enum VerifyParser {
         }
     }
 
-    // Mirror of Sources/GitSyncMenuBar/Resources/all-events.txt — embedded
-    // directly so the parser check works without shipping the fixture as a
-    // resource (avoids SPM bundle path issues inside the .app). To refresh:
-    //   python3 synthesize_fixture.py > Sources/GitSyncMenuBar/Resources/all-events.txt
-    // then paste the contents here (the .txt file remains the source of truth
-    // and is what tests under Xcode would read directly).
+    // Mirror of Sources/GitSync/Resources/all-events.txt — embedded directly so
+    // the parser check works without shipping the fixture as a resource (avoids
+    // SPM bundle path issues inside the .app). The .txt file is the readable
+    // source of truth; if you edit one, keep the other in sync.
     private static let embeddedFixture = """
     \u{1E}GSE {"kind":"session_start","description":"GitLab sync","total":3}
     \u{1E}GSE {"kind":"worker_start","rel":"group/project-a","op":"clone"}

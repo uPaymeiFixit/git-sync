@@ -1,8 +1,7 @@
 import Foundation
 
 // A fixed pool of REAL OS threads for running blocking git work (clone/fetch
-// shell out and block on network+disk I/O). Direct analogue of Python's
-// ThreadPoolExecutor(max_workers=PARALLEL).
+// shell out and block on network+disk I/O) — a bounded worker pool of width N.
 //
 // WHY NOT the obvious GCD version: the previous implementation did
 // `concurrentQueue.async { semaphore.wait(); work() }`. At width=128 GCD
