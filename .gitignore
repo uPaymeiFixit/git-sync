@@ -1,3 +1,9 @@
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/
+DerivedData/
+
+# Local-only env file (kept as a guard; not used by the app)
 .envrc
-__pycache__/
-*.pyc

@@ -14,7 +14,6 @@ lives in the app — there are no environment variables or config files to manag
 ## Build & install
 
 ```
-cd menubar
 ./Tools/make-signing-cert.sh    # one-time: stable signing identity (stops keychain re-prompts)
 ./build.sh release              # produces .build/release/GitSync.app
 cp -r .build/release/GitSync.app /Applications/
@@ -22,8 +21,24 @@ xattr -dr com.apple.quarantine /Applications/GitSync.app   # first launch only
 open /Applications/GitSync.app
 ```
 
-See [menubar/README.md](menubar/README.md) for architecture, the signing/keychain
-details, and the CLI test harnesses.
+### Code signing & keychain prompts
+
+`build.sh` signs with a stable local identity ("GitSync Self-Signed") so the
+keychain ACL on your stored tokens matches across rebuilds — without that you'd
+re-enter your login password for every secret on each launch.
+`Tools/make-signing-cert.sh` (run once) creates the identity **and** trusts it
+for code signing — both matter: a stable signature that isn't *trusted* still
+triggers prompts. If you made the cert with an older version of that script (no
+trust step), repair it without recreating it:
+
+```
+security find-certificate -c "GitSync Self-Signed" -p > /tmp/gitsync.pem
+security add-trusted-cert -r trustRoot -p codeSign \
+    -k "$HOME/Library/Keychains/login.keychain-db" /tmp/gitsync.pem
+```
+
+For distribution to other Macs, set `SIGN_IDENTITY` to a Developer ID
+Application identity and notarize the bundle.
 
 ## Configuration
 
@@ -78,3 +93,44 @@ GitSync is running, with sleep-aware catch-up for missed runs; enable **Launch
 at Login** so the app comes back after a reboot. A platform that's unreachable
 (e.g. GitLab behind a VPN that's down) is isolated — it stays due and retries
 cheaply without dragging the others along or touching any repos.
+
+## Architecture
+
+Single Swift package (`Package.swift` at the repo root, sources under
+`Sources/GitSync/`):
+
+```
+GitSync.app
+├── AppState              — observable source of truth + event router
+├── SyncEngine            — pure-Swift sync engine; drives git directly
+│   ├── PlatformDiscovery — GitLab/GitHub/Bitbucket REST clients
+│   └── RepoSyncer        — the clone-or-update decision tree
+├── BufferSink/EventBuffer— engine emits events; batched + coalesced for the UI
+├── InventoryStore        — persistent repo state keyed by (providerID, platform, rel)
+├── ProviderStore         — configured sync sources (UserDefaults) + tokens (Keychain)
+├── HistoryStore          — per-run logs on disk
+├── SettingsStore         — shared run config (UserDefaults)
+└── MenuBarExtra UI       — three icon states: idle / running / attention
+```
+
+The engine runs git in-process with the inherited environment (so git's
+`~/.config`, credential helpers, and ssh config behave as they do in a shell).
+The inventory persists at `~/Library/Application Support/GitSync/inventory.json`
+(a JSON array of `Repo` records; cleared only by deleting the file).
+
+## CLI test harnesses
+
+The Command Line Tools toolchain ships no XCTest, so the executable carries its
+own diagnostic modes:
+
+```
+.build/release/GitSync.app/Contents/MacOS/GitSync --verify-parser              # event wire-format parser
+.build/release/GitSync.app/Contents/MacOS/GitSync --smoke-test                 # engine wiring (no providers)
+.build/release/GitSync.app/Contents/MacOS/GitSync --load-test                  # EventBuffer throughput
+.build/release/GitSync.app/Contents/MacOS/GitSync --trash-test                 # delete-path safety
+.build/release/GitSync.app/Contents/MacOS/GitSync --whitelist-test             # tracked-only filter
+.build/release/GitSync.app/Contents/MacOS/GitSync --provider-migration-test    # legacy→provider migration
+.build/release/GitSync.app/Contents/MacOS/GitSync --provider-validation-test   # provider folder-collision guard
+.build/release/GitSync.app/Contents/MacOS/GitSync --abort-reset-test           # cancel doesn't poison later syncs
+.build/release/GitSync.app/Contents/MacOS/GitSync --scheduler-test             # due/catch-up logic
+```
