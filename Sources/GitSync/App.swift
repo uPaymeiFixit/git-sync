@@ -3,7 +3,6 @@ import SwiftUI
 @main
 struct GitSyncApp: App {
     @StateObject private var settings: SettingsStore
-    @StateObject private var history: HistoryStore
     @StateObject private var inventory: InventoryStore
     @StateObject private var providers: ProviderStore
     @StateObject private var state: AppState
@@ -60,30 +59,25 @@ struct GitSyncApp: App {
             exit(ProviderMigrationTest.run())
         }
 
-        // Order matters: settings + history + inventory must exist before
-        // AppState so the engine picks up the user's stored settings, the
-        // history store can record completed runs, and the inventory store
-        // can absorb remote_project + outcome events as they stream in.
+        // Order matters: settings + inventory must exist before AppState so the
+        // engine picks up the user's stored settings and the inventory store can
+        // absorb remote_project + outcome events as they stream in.
         let settingsStore = SettingsStore()
-        let historyStore = HistoryStore()
         let providerStore = ProviderStore()   // migrates legacy config on first run
         let inventoryStore = InventoryStore(providers: providerStore.providers)
         _settings  = StateObject(wrappedValue: settingsStore)
-        _history   = StateObject(wrappedValue: historyStore)
         _providers = StateObject(wrappedValue: providerStore)
         _inventory = StateObject(wrappedValue: inventoryStore)
         _state     = StateObject(wrappedValue: AppState(
             settings: settingsStore,
-            history: historyStore,
             inventory: inventoryStore,
             providers: providerStore
         ))
 
         // Seed the inventory on first launch (best-effort, async). The disk
-        // walk now needs the provider list (each provider has its own folder).
+        // walk needs the provider list (each provider has its own folder).
         let provs = providerStore.providers
         Task { @MainActor in
-            inventoryStore.seedFromHistory(historyStore)
             await inventoryStore.seedFromDisk(providers: provs)
         }
     }
@@ -111,7 +105,6 @@ struct GitSyncApp: App {
             MenuContent()
                 .environmentObject(state)
                 .environmentObject(settings)
-                .environmentObject(history)
                 .environmentObject(inventory)
                 .environmentObject(providers)
                 .onAppear {
@@ -149,13 +142,6 @@ struct GitSyncApp: App {
                 .environmentObject(settings)
                 .environmentObject(inventory)
                 .environmentObject(providers)
-        }
-        .windowResizability(.contentSize)
-
-        Window("Run history", id: "history") {
-            HistoryWindow()
-                .environmentObject(history)
-                .environmentObject(state)
         }
         .windowResizability(.contentSize)
     }

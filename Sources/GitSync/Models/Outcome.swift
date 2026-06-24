@@ -1,9 +1,10 @@
 import Foundation
 
-// The result of syncing one repo, produced by the engine (RepoSyncer / StaleScan)
-// and persisted in run history. Codable with snake_case wire keys (see
-// CodingKeys) so older history JSON still decodes. `platform` defaults to empty
-// for back-compat with history that predates the field.
+// The result of syncing one repo, produced by the engine (RepoSyncer / StaleScan).
+// Feeds the inventory (one row per repo) and the activity log. Codable with
+// snake_case wire keys (see CodingKeys) so older inventory JSON still decodes;
+// `platform`/`providerID` default to empty for back-compat with rows that
+// predate those fields.
 struct Outcome: Codable, Hashable, Identifiable, Sendable {
     let platform: String
     let rel: String

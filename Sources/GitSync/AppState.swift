@@ -3,8 +3,8 @@ import SwiftUI
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var currentRun: RunRecord?
-    @Published var lastRun: RunRecord?
+    @Published var currentRun: LiveRun?
+    @Published var lastRun: LiveRun?
     @Published var dismissedRunID: UUID?
     // Per-platform live worker state during a run. Keyed by platform name;
     // each value maps `rel` (repo path under the platform root) to its
@@ -18,7 +18,6 @@ final class AppState: ObservableObject {
     @Published var syncingRepos: Set<RepoID> = []
 
     private let settingsStore: SettingsStore
-    private let history: HistoryStore
     let inventory: InventoryStore
     let providers: ProviderStore
     let eventBuffer = EventBuffer()
@@ -36,9 +35,8 @@ final class AppState: ObservableObject {
     )
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore, providers: providers)
 
-    init(settings: SettingsStore, history: HistoryStore, inventory: InventoryStore, providers: ProviderStore) {
+    init(settings: SettingsStore, inventory: InventoryStore, providers: ProviderStore) {
         self.settingsStore = settings
-        self.history = history
         self.inventory = inventory
         self.providers = providers
     }
@@ -90,10 +88,13 @@ final class AppState: ObservableObject {
         // is already in flight (rule 1). The engine enforces this again as
         // the authoritative gate; this is the UI-side mirror.
         guard currentRun == nil, syncingRepos.isEmpty else { return }
-        currentRun = RunRecord()
+        currentRun = LiveRun()
         dismissedRunID = nil
         activeWorkers = [:]
         retainDrainTimer()
+        let label = only.map { $0.map(\.rawValue).sorted().joined(separator: ", ") }
+            ?? "all enabled platforms"
+        RunLog.runStarted(platforms: label)
         let snapshot = withTrackingEnv(settingsStore.currentSyncSettings)
         Task {
             await engine.updateSettings(snapshot)
@@ -136,6 +137,7 @@ final class AppState: ObservableObject {
             resolve: { resolver($0) },
             allowedRoots: allowed)
         for id in report.trashed {
+            RunLog.trashed(id)
             let repo = inventory.repos[id]
             let remoteStillHasIt = repo?.lastSeenRemoteAt != nil
                 && repo?.lastStatus != .staleOnDisk
@@ -144,6 +146,9 @@ final class AppState: ObservableObject {
             } else {
                 inventory.remove(id)
             }
+        }
+        for entry in report.skipped {
+            RunLog.trashSkipped(entry.id, reason: entry.reason)
         }
         // Self-heal: a row skipped as "not on disk" is a zombie (the inventory
         // thinks it's present but the folder is gone — e.g. an earlier delete
@@ -230,12 +235,13 @@ final class AppState: ObservableObject {
     // action. Runs in parallel with other individual syncs (different repos
     // = disjoint .git dirs = safe). Refused only if a full run is active
     // (rule 1) or this exact repo is already syncing (rule 3). Does NOT
-    // create a RunRecord or touch history/last-run — individual results land
-    // in the inventory only (rule 5).
+    // create a LiveRun or touch last-run — individual results land in the
+    // inventory and the log only (rule 5).
     func syncRepo(_ id: RepoID) {
         guard currentRun == nil else { return }
         guard !syncingRepos.contains(id) else { return }
         guard Platform(rawValue: id.platform) != nil else { return }
+        RunLog.oneOffStarted(id)
         // Mark busy synchronously (before the await) so the row spins on the
         // very next render and a second click is rejected immediately. The
         // engine pushes an individual-finish on every early-return path, so
@@ -308,15 +314,12 @@ final class AppState: ObservableObject {
                 activeWorkers[snap.platform, default: [:]][snap.rel] = w
             }
         }
-        // Captured stderr lines + the coarse run-phase label. Folded into one
-        // working-copy mutation so @Published republishes once per drain.
-        if currentRun != nil, !batch.logs.isEmpty || batch.runPhase != nil {
-            var run = currentRun!
-            for entry in batch.logs {
-                run.logLines.append("[\(entry.platform)] \(entry.line)")
-            }
-            if let label = batch.runPhase { run.phaseLabel = label }
-            currentRun = run
+        // The coarse run-phase label drives the menu's "Running…" subtitle and
+        // is mirrored to the log. Captured stderr lines (batch.logs) are no
+        // longer surfaced in-app — the engine's own logging covers debugging.
+        if currentRun != nil, let label = batch.runPhase {
+            currentRun?.phaseLabel = label
+            RunLog.runPhase(label)
         }
         // Per-platform terminations + activeWorkers cleanup (full-run lane).
         for finish in batch.finishes {
@@ -344,7 +347,10 @@ final class AppState: ObservableObject {
         lastRun = run
         currentRun = nil
         activeWorkers = [:]
-        history.record(run)
+        RunLog.runFinished(
+            exitCodes: run.exitCodes,
+            outcomes: run.outcomes.count,
+            duration: (run.endedAt ?? Date()).timeIntervalSince(run.startedAt))
         releaseDrainTimer()
         // Record success PER PLATFORM: each platform that exited 0 stamps its
         // own last-success time. A VPN-down run where GitLab exits 1 stamps
@@ -380,6 +386,7 @@ final class AppState: ObservableObject {
         case .outcome(_, let outcome):
             currentRun?.outcomes.append(outcome)
             inventory.apply(outcome: outcome)
+            RunLog.outcome(outcome)
         case .remoteProject(let providerID, let platform, let rel, let sshURL, let defaultBranch):
             inventory.apply(remoteProject: providerID, platform: platform, rel: rel,
                             sshURL: sshURL, defaultBranch: defaultBranch)

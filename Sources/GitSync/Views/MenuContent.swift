@@ -61,11 +61,11 @@ struct MenuContent: View {
         }
         .keyboardShortcut("h", modifiers: .command)
 
-        Button("Show history…") {
-            openWindow(id: "history")
-            bringAppWindowsToFront()
+        Button("Open activity log…") {
+            ConsoleLog.open()
         }
-        .keyboardShortcut("h", modifiers: [.command, .shift])
+        .keyboardShortcut("l", modifiers: .command)
+        .help("Open the running sync/deletion log in Console.app")
 
         if providers.isConfigured {
             // Re-runnable setup for the already-configured (the unconfigured
@@ -106,7 +106,7 @@ struct MenuContent: View {
 // don't compose if/else-if/else chains nicely as inline @ViewBuilder
 // computed properties inside a parent body that has other siblings.
 private struct LastRunSummary: View {
-    let run: RunRecord
+    let run: LiveRun
     let anomalyCount: Int
 
     var body: some View {

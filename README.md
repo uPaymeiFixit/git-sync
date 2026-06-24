@@ -75,8 +75,18 @@ The **Repositories** window (⌘H) shows a live inventory of every known repo
 keyed by `(provider, platform, rel)`, grouped by status (diverged, dirty, stale,
 not-cloned-yet, …) and searchable/filterable. Click a repo to reveal it in
 Finder; right-click for per-repo actions (sync this one, add to skip list, copy
-SSH URL). **Run history** (⇧⌘H) keeps the per-run log for when something needs
-investigating.
+SSH URL). While a full sync is running, a live activity panel at the top of this
+window shows what every worker is doing right now (so a wedge is obvious).
+
+Every sync, one-off resync, per-repo outcome, and deletion is written to the
+unified system log. **Open activity log…** (⌘L) launches Console.app and copies a
+ready-to-paste filter (`subsystem == "com.uPaymeiFixit.GitSync"`) to the
+clipboard. From a terminal:
+
+```sh
+log stream --predicate 'subsystem == "com.uPaymeiFixit.GitSync"' --info
+log show   --predicate 'subsystem == "com.uPaymeiFixit.GitSync"' --info --last 1h
+```
 
 ## Skipping repos
 

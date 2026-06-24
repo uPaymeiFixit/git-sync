@@ -11,8 +11,6 @@ import SwiftUI
 //   with status X." Updates an existing row or creates one.
 // - Disk walk at launch (`seedFromDisk`): finds .git directories under
 //   GIT_SYNC_ROOT so the inventory isn't empty before the first run.
-// - History replay (`seedFromHistory`): iterates persisted run records
-//   newest-first and fills in `lastStatus` for any row not yet touched.
 //
 // Persistence: a single JSON file at
 // ~/Library/Application Support/GitSync/inventory.json. Saved on every
@@ -199,28 +197,6 @@ final class InventoryStore: ObservableObject {
             repos[id] = repo
         }
         if !found.isEmpty { scheduleSave() }
-    }
-
-    // Iterate history newest-first, applying any outcome whose repo doesn't
-    // already have a `lastStatus`. Outcomes from older runs have providerID ""
-    // and a prefixed rel — map them the same way the inventory migration does
-    // so history-seeded rows share identity with migrated rows (else ghost
-    // duplicates reappear).
-    func seedFromHistory(_ history: HistoryStore) {
-        for run in history.runs {
-            for outcome in run.outcomes where !outcome.platform.isEmpty {
-                var o = outcome
-                if o.providerID.isEmpty, let prov = providerFor(legacyPlatform: o.platform, rel: o.rel) {
-                    o = Outcome(platform: o.platform, rel: Self.stripDirPrefix(o.rel),
-                                status: o.status, url: o.url, detail: o.detail,
-                                oldSha: o.oldSha, newSha: o.newSha,
-                                commitsAhead: o.commitsAhead, providerID: prov.id.uuidString)
-                }
-                let id = RepoID(providerID: o.providerID, platform: o.platform, rel: o.rel)
-                if repos[id]?.lastStatus != nil { continue }
-                apply(outcome: o)
-            }
-        }
     }
 
     // ---- Persistence -------------------------------------------------
