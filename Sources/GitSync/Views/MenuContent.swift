@@ -4,6 +4,7 @@ struct MenuContent: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var providers: ProviderStore
+    @EnvironmentObject private var updater: SparkleUpdater
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -90,8 +91,9 @@ struct MenuContent: View {
         })
 
         Button("Check for updates…") {
-            Task { await UpdateChecker.check() }
+            updater.checkForUpdates()
         }
+        .disabled(!updater.canCheck)
 
         Divider()
 

@@ -5,5 +5,9 @@ Package.resolved
 *.xcodeproj/
 DerivedData/
 
+# Packaged release archives (uploaded to GitHub Releases, not committed).
+# appcast.xml IS committed — it's the Sparkle update feed.
+GitSync-v*.zip
+
 # Local-only env file (kept as a guard; not used by the app)
 .envrc

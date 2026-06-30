@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.1</string>
+    <string>1.2.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>LSUIElement</key>
@@ -28,5 +28,20 @@
     <string>GitSync — sync many git repos at once</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- Sparkle auto-update. The appcast is served from the repo's main branch
+         (raw.githubusercontent) and points at each GitHub release's signed zip.
+         SUPublicEDKey is the EdDSA public key whose private half lives in the
+         maintainer's Keychain (see Tools/sparkle-sign.sh); updates that aren't
+         signed by it are rejected — this is what makes auto-update safe for an
+         app that isn't notarized. -->
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/uPaymeiFixit/git-sync/main/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>2cO2kR95wwDRekf9K7dqCRBn67nSrZrmlASo6pkwVAs=</string>
+    <!-- Don't auto-check on a timer by default; the menu's "Check for updates…"
+         and the standard updater's prompt drive it. The user can opt into
+         automatic checks from Sparkle's first-run prompt. -->
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
 </dict>
 </plist>

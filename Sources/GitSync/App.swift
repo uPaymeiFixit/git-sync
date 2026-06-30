@@ -6,6 +6,7 @@ struct GitSyncApp: App {
     @StateObject private var inventory: InventoryStore
     @StateObject private var providers: ProviderStore
     @StateObject private var state: AppState
+    @StateObject private var updater = SparkleUpdater()
 
     init() {
         // Raise the open-file-descriptor soft limit FIRST. A GUI app launched
@@ -110,6 +111,7 @@ struct GitSyncApp: App {
                 .environmentObject(settings)
                 .environmentObject(inventory)
                 .environmentObject(providers)
+                .environmentObject(updater)
                 .onAppear {
                     _ = state.scheduler   // ensure scheduler is built
                     installTerminationGuard()

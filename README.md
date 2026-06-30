@@ -76,6 +76,11 @@ Download `GitSync.app` from the [latest release][releases], move it to
 xattr -dr com.apple.quarantine /Applications/GitSync.app
 ```
 
+After that, GitSync **updates itself** — **Check for updates…** in the menu (or
+the periodic check you can opt into) downloads and installs new versions in
+place. Updates are verified by an EdDSA signature, so only releases signed with
+the project's private key will install.
+
 ### Build from source
 
 ```sh
@@ -164,8 +169,17 @@ GitSync.app
 ├── ProviderStore         — configured sync sources (UserDefaults) + tokens (Keychain)
 ├── SettingsStore         — shared run config (UserDefaults)
 ├── RunLog                — unified-logging record of runs, outcomes, deletions
+├── SparkleUpdater        — in-app auto-update (Sparkle, EdDSA-signed releases)
 └── MenuBarExtra UI       — three icon states: idle / running / attention
 ```
+
+Releases are signed for auto-update with `Tools/sparkle-release.sh <version>
+<zip>`, which EdDSA-signs the archive (private key in the maintainer's Keychain)
+and writes an `<item>` into `appcast.xml` — the feed Sparkle reads from the repo's
+`main` branch. `build.sh` embeds `Sparkle.framework` into `Contents/Frameworks`
+and code-signs its nested helpers inside-out under the app's identity (the
+hardened runtime is left off for self-signed builds so Library Validation lets
+the same-identity framework load).
 
 The engine runs git in-process with the inherited environment (so git's
 `~/.config`, credential helpers, and ssh config behave as they do in a shell).
