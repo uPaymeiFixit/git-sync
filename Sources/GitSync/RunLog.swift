@@ -35,6 +35,15 @@ enum RunLog {
         run.info("run phase — \(label, privacy: .public)")
     }
 
+    // Free-form engine diagnostics (the `sink.logLine` channel): discovery
+    // failures ("discovery failed: HTTP 401 unauthorized…"), host-unreachable
+    // notices, etc. These are the lines that explain a platform exiting 1 with
+    // zero repos — without them, a failed run looks like "nothing happened."
+    // Logged at .notice so they survive the default log level.
+    static func engine(_ message: String, platform: String) {
+        run.notice("\(platform, privacy: .public): \(message, privacy: .public)")
+    }
+
     static func runFinished(exitCodes: [String: Int32], outcomes: Int, duration: TimeInterval) {
         let codes = exitCodes.isEmpty
             ? "no platforms"
@@ -76,28 +85,76 @@ enum RunLog {
     }
 }
 
-// Opens the activity log for viewing. There's no public API and no Console.app
-// URL scheme to pre-apply a subsystem filter, so we do the next best thing:
-// copy a ready-to-paste `log` predicate to the clipboard, then launch Console.
-// The user pastes the predicate into Console's search field (or runs it in a
-// terminal) to see exactly GitSync's entries.
+// Opens the activity log for viewing.
+//
+// Console.app is a dead end for this: it opens to "No messages" until you click
+// Start Streaming, and even then it shows the FIREHOSE (everything on the
+// system) with no way to pre-apply our subsystem filter — there's no public API
+// or URL scheme to drive it. So instead we open Terminal running the `log
+// stream` command from the README: a live, correctly-filtered tail of exactly
+// GitSync's entries, scrolling as runs happen. One click, no setup.
 @MainActor
 enum ConsoleLog {
-    // A predicate that works both in Console.app's search bar and as the
-    // argument to `log stream --predicate '…'` / `log show --predicate '…'`.
+    // The predicate that scopes the stream to just GitSync's entries. Also
+    // valid in Console.app's search bar / `log show --predicate '…'` if a user
+    // prefers those.
     static let predicate = #"subsystem == "com.uPaymeiFixit.GitSync""#
 
+    // The full command we run. `--info` includes the .info-level routine
+    // outcomes (clean/skipped), not just the .notice-level anomalies; `--style
+    // compact` keeps each entry on a readable single line. An initial `log
+    // show … --last 1h` prints recent history first so the window isn't empty
+    // until the next event, then `log stream` tails live.
+    static var streamCommand: String {
+        let p = "'\(predicate)'"
+        return "log show --predicate \(p) --info --style compact --last 1h; "
+             + "echo '— streaming live (Ctrl-C to stop) —'; "
+             + "log stream --predicate \(p) --info --style compact"
+    }
+
     static func open() {
+        // Always put the command on the clipboard as a fallback: if driving
+        // Terminal fails (automation permission denied, Terminal missing), the
+        // user can paste it into any shell.
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(predicate, forType: .string)
-        if let console = NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: "com.apple.Console") {
-            NSWorkspace.shared.openApplication(at: console, configuration: .init())
-        } else {
-            // Console.app missing/renamed — fall back to opening /Applications
-            // Utilities so the user can find it manually.
-            NSWorkspace.shared.open(
-                URL(fileURLWithPath: "/System/Applications/Utilities", isDirectory: true))
+        NSPasteboard.general.setString(streamCommand, forType: .string)
+
+        guard runInTerminal(streamCommand) else {
+            // Couldn't drive Terminal — open it (or fall back to Utilities) so
+            // the user has somewhere to paste the command we just copied.
+            if let term = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.apple.Terminal") {
+                NSWorkspace.shared.openApplication(at: term, configuration: .init())
+            } else {
+                NSWorkspace.shared.open(
+                    URL(fileURLWithPath: "/System/Applications/Utilities", isDirectory: true))
+            }
+            return
+        }
+    }
+
+    // Launch Terminal and run `command` in a new window via AppleScript.
+    // Returns false if osascript couldn't be run or reported an error.
+    private static func runInTerminal(_ command: String) -> Bool {
+        // Escape for an AppleScript string literal: backslash then double-quote.
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
         }
     }
 }

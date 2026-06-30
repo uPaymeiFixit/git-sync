@@ -65,7 +65,7 @@ struct MenuContent: View {
             ConsoleLog.open()
         }
         .keyboardShortcut("l", modifiers: .command)
-        .help("Open the running sync/deletion log in Console.app")
+        .help("Open a live, filtered tail of the sync/deletion log in Terminal")
 
         if providers.isConfigured {
             // Re-runnable setup for the already-configured (the unconfigured

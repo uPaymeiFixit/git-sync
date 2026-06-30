@@ -130,8 +130,9 @@ left alone.
 
 Every sync, one-off resync, per-repo outcome, and deletion is written to the
 macOS unified log — so there's a durable record of what happened without GitSync
-storing log files itself. **Open activity log…** (⌘L) launches Console.app and
-copies a ready-to-paste filter to your clipboard. Or read it from a terminal:
+storing log files itself. **Open activity log…** (⌘L) opens Terminal on a live,
+filtered tail of exactly GitSync's entries (recent history first, then streaming).
+Or run it yourself from any terminal:
 
 ```sh
 log show   --predicate 'subsystem == "com.uPaymeiFixit.GitSync"' --info --last 1d

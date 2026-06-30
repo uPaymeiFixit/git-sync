@@ -16,6 +16,14 @@ final class AppState: ObservableObject {
     // exclusive (see startRun / syncRepo guards), so this is empty whenever
     // currentRun != nil and vice versa.
     @Published var syncingRepos: Set<RepoID> = []
+    // Last connection-test result per provider (UUID). Drives the status dot in
+    // the Providers list and lets the editor restore a prior result. Populated
+    // by testConnection(for:) — from the editor's Test button and a one-shot
+    // check when the Providers tab appears. Not persisted (a credential could
+    // be revoked between launches; a stale green dot would mislead).
+    @Published var connectionStatus: [UUID: ConnectionTestResult] = [:]
+    // Providers with a connection test currently in flight (spinner in the dot).
+    @Published var connectionTesting: Set<UUID> = []
 
     private let settingsStore: SettingsStore
     let inventory: InventoryStore
@@ -231,6 +239,39 @@ final class AppState: ObservableObject {
         return v
     }
 
+    // Run a connection test for a configured provider (uses its stored token)
+    // and publish the result into connectionStatus, driving the list's dot.
+    // Off-main network call; result is applied back on the main actor.
+    func testConnection(for provider: Provider) {
+        guard !connectionTesting.contains(provider.id) else { return }
+        connectionTesting.insert(provider.id)
+        let kind = provider.kind
+        let host = provider.host
+        let scope = provider.scope
+        let user = provider.bitbucketUser
+        let token = providers.token(for: provider)
+        let archived = provider.includeArchived
+        let id = provider.id
+        Task.detached {
+            let result = ConnectionTester.test(
+                kind: kind, host: host, scope: scope,
+                bitbucketUser: user, token: token, includeArchived: archived)
+            await MainActor.run {
+                self.connectionStatus[id] = result
+                self.connectionTesting.remove(id)
+            }
+        }
+    }
+
+    // Test every configured provider once (e.g. when the Providers tab opens),
+    // skipping any already tested this session or currently in flight.
+    func testAllUntestedProviders() {
+        for p in providers.providers where p.isConfigured
+            && connectionStatus[p.id] == nil && !connectionTesting.contains(p.id) {
+            testConnection(for: p)
+        }
+    }
+
     // Per-repo sync triggered from the Repositories view's "Sync this repo"
     // action. Runs in parallel with other individual syncs (different repos
     // = disjoint .git dirs = safe). Refused only if a full run is active
@@ -315,11 +356,16 @@ final class AppState: ObservableObject {
             }
         }
         // The coarse run-phase label drives the menu's "Running…" subtitle and
-        // is mirrored to the log. Captured stderr lines (batch.logs) are no
-        // longer surfaced in-app — the engine's own logging covers debugging.
+        // is mirrored to the log.
         if currentRun != nil, let label = batch.runPhase {
             currentRun?.phaseLabel = label
             RunLog.runPhase(label)
+        }
+        // Engine diagnostics (discovery failures, host-unreachable notices).
+        // These explain a platform exiting 1 with zero repos — write them to
+        // the activity log so the failure is visible, not silently swallowed.
+        for log in batch.logs {
+            RunLog.engine(log.line, platform: log.platform)
         }
         // Per-platform terminations + activeWorkers cleanup (full-run lane).
         for finish in batch.finishes {

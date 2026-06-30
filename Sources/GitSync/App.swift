@@ -58,6 +58,9 @@ struct GitSyncApp: App {
         if args.contains("--provider-migration-test") {
             exit(ProviderMigrationTest.run())
         }
+        if args.contains("--connection-test") {
+            exit(ConnectionTest.run())
+        }
 
         // Order matters: settings + inventory must exist before AppState so the
         // engine picks up the user's stored settings and the inventory store can

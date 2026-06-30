@@ -28,6 +28,17 @@ struct OnboardingView: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 460)
+                Label {
+                    Text("You'll need an access token, not your account password. Each provider tells you which kind and links to where to create it — use **Test Connection** to confirm it works before finishing.")
+                } icon: {
+                    Image(systemName: "key.fill")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 460)
+                .padding(.top, 2)
             }
             .padding(.top, 24)
             .padding(.horizontal, 24)

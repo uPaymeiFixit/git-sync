@@ -21,6 +21,20 @@ struct DiscoveryResult: Sendable {
     var fatalError: String? = nil   // non-nil = hard failure (exit 1 equivalent)
 }
 
+// The outcome of a credential test: enough detail to show the user exactly
+// what's wrong (right host, wrong token? wrong workspace? VPN down?) instead
+// of a silent failure.
+enum ConnectionTestResult: Sendable, Equatable {
+    case ok(reposVisible: Int?)   // authenticated; optionally how many repos we saw
+    case unauthorized             // 401 — wrong username/token (Bitbucket: account password)
+    case forbidden                // 403 — token lacks the required scope
+    case notFound                 // 404 — wrong workspace/org/host slug
+    case unreachable(String)      // transport-level (VPN down, DNS, refused)
+    case failed(String)           // anything else (5xx, unparseable, etc.)
+
+    var isOK: Bool { if case .ok = self { return true } else { return false } }
+}
+
 // Common protocol; each platform is a Sendable value built from settings.
 protocol PlatformDiscovery: Sendable {
     var platform: Platform { get }
@@ -33,6 +47,36 @@ protocol PlatformDiscovery: Sendable {
     // `namespacePath` is the platform-native repo path (RepoID.namespacePath):
     // GitLab path_with_namespace, GitHub repo name, Bitbucket slug.
     func discoverOne(namespacePath: String) -> DiscoveredRepo?
+    // One cheap authenticated request that proves the credentials work, used
+    // by the provider editor's "Test connection" button and the status dot.
+    // Classifies the failure so the user gets an actionable message rather
+    // than the silent "0 repos" that hid this bug.
+    func testConnection() -> ConnectionTestResult
+}
+
+// Shared classifier: run one authenticated single-item GET and map the result
+// to a ConnectionTestResult. `countKey` (when set) lets a client report how
+// many repos the workspace/org has, parsed from the JSON body.
+func classifyAuthProbe(
+    _ url: URL, headers: [String: String], accept: String,
+    countFrom: (@Sendable (Data) -> Int?)? = nil
+) -> ConnectionTestResult {
+    // Single attempt (no retry/backoff): a credential test should answer fast.
+    do {
+        let resp = try HTTPClient.get(url, headers: headers, accept: accept, attempts: 1)
+        return .ok(reposVisible: countFrom?(resp.body))
+    } catch let e as HTTPClient.HTTPCodeError {
+        switch e.code {
+        case 401: return .unauthorized
+        case 403: return .forbidden
+        case 404: return .notFound
+        default:  return .failed("HTTP \(e.code)")
+        }
+    } catch {
+        // HTTPClient throws a generic NSError after exhausting attempts (here,
+        // one) on transport errors — treat as unreachable.
+        return .unreachable(error.localizedDescription)
+    }
 }
 
 // Fast reachability probe: can we open a connection to `url` within `timeout`
@@ -163,6 +207,15 @@ struct GitLabClient: PlatformDiscovery {
         else { return nil }
         let dest = platformRoot.appendingPathComponent(pathNS)
         return DiscoveredRepo(rel: rel(dest), sshURL: sshURL, defaultBranch: branch, namespacePath: pathNS)
+    }
+
+    func testConnection() -> ConnectionTestResult {
+        guard let url = URL(string: "\(apiBase)/projects?membership=true&simple=true&per_page=1") else {
+            return .failed("bad host")
+        }
+        return classifyAuthProbe(url, headers: headers, accept: accept) { data in
+            (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]])?.count
+        }
     }
 
     private func parseNextLink(_ header: String) -> URL? {
@@ -317,6 +370,17 @@ struct GitHubClient: PlatformDiscovery {
         return DiscoveredRepo(rel: rel(dest), sshURL: ssh, defaultBranch: branch, namespacePath: repoName)
     }
 
+    func testConnection() -> ConnectionTestResult {
+        // List the org's repos (1 item) — proves both that the token is valid
+        // AND that it can see the org (404 if the org slug is wrong).
+        guard let url = URL(string: "\(api)/orgs/\(org)/repos?per_page=1&type=all") else {
+            return .failed("bad org")
+        }
+        return classifyAuthProbe(url, headers: headers, accept: accept) { data in
+            (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]])?.count
+        }
+    }
+
     // Parse the RFC 5988 Link header's rel="next" URL: <url>; rel="next"
     private func parseNextLink(_ header: String) -> URL? {
         guard !header.isEmpty,
@@ -399,6 +463,19 @@ struct BitbucketClient: PlatformDiscovery {
         return DiscoveredRepo(rel: rel(dest), sshURL: ssh, defaultBranch: mb, namespacePath: repoSlug)
     }
 
+    func testConnection() -> ConnectionTestResult {
+        // One repo from the workspace. 401 = bad username/token (or the
+        // account password, which Bitbucket's API never accepts); 404 = wrong
+        // workspace slug; 403 = token missing repository:read.
+        guard let url = URL(string:
+            "\(api)/repositories/\(workspace)?pagelen=1&fields=size,values.slug") else {
+            return .failed("bad workspace")
+        }
+        return classifyAuthProbe(url, headers: headers, accept: accept) { data in
+            (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["size"] as? Int
+        }
+    }
+
     // Extract the SSH clone URL from links.clone[] where name == "ssh".
     private func cloneSSH(_ v: [String: Any]) -> String? {
         let clones = (v["links"] as? [String: Any])?["clone"] as? [[String: Any]] ?? []
@@ -409,5 +486,85 @@ struct BitbucketClient: PlatformDiscovery {
         let root = platformRoot.standardizedFileURL.path
         let d = dest.standardizedFileURL.path
         return d.hasPrefix(root + "/") ? String(d.dropFirst(root.count + 1)) : d
+    }
+}
+
+// ---- Credential tester ------------------------------------------------
+// Builds the right client from a (possibly unsaved) Provider draft + token and
+// runs its authenticated probe. Used by the provider editor's "Test connection"
+// button — so the user finds out the credentials are wrong AT SETUP, not after
+// a scheduled run silently syncs nothing. Pure value-in / value-out; the
+// network call is synchronous (like the rest of discovery) so callers run it
+// off the main thread.
+enum ConnectionTester {
+    static func test(kind: ProviderKind, host: String, scope: String,
+                     bitbucketUser: String, token: String,
+                     includeArchived: Bool = false) -> ConnectionTestResult {
+        // Reject empties up front with a precise message rather than a confusing
+        // network error (e.g. an empty workspace 404s on a weird URL).
+        if token.trimmingCharacters(in: .whitespaces).isEmpty {
+            return .failed("Enter a \(kind.credentialLabel.lowercased()) first.")
+        }
+        let root = URL(fileURLWithPath: NSHomeDirectory())   // unused by testConnection
+        switch kind {
+        case .gitlab:
+            if host.trimmingCharacters(in: .whitespaces).isEmpty { return .failed("Enter the GitLab host first.") }
+            return GitLabClient(host: host, token: token, includeArchived: includeArchived,
+                                syncRoot: root).testConnection()
+        case .github:
+            if scope.trimmingCharacters(in: .whitespaces).isEmpty { return .failed("Enter the organization first.") }
+            return GitHubClient(org: scope, token: token, includeArchived: includeArchived,
+                                syncRoot: root).testConnection()
+        case .bitbucket:
+            if scope.trimmingCharacters(in: .whitespaces).isEmpty { return .failed("Enter the workspace first.") }
+            if bitbucketUser.trimmingCharacters(in: .whitespaces).isEmpty { return .failed("Enter the username first.") }
+            return BitbucketClient(workspace: scope, user: bitbucketUser, appPassword: token,
+                                   syncRoot: root).testConnection()
+        }
+    }
+}
+
+// A user-facing summary of a ConnectionTestResult: the symbol + colour for the
+// status dot and a one-line explanation. Kept next to the result type so the
+// view layer stays declarative.
+extension ConnectionTestResult {
+    var headline: String {
+        switch self {
+        case .ok(let n):
+            if let n, n > 0 { return "Connected — \(n)\(n == 1 ? " repo" : "+ repos") visible" }
+            return "Connected"
+        case .unauthorized: return "Authentication failed (401)"
+        case .forbidden:    return "Access denied (403)"
+        case .notFound:     return "Not found (404)"
+        case .unreachable:  return "Couldn’t reach the host"
+        case .failed(let m): return m
+        }
+    }
+
+    // The actionable next step, shown under the headline.
+    func detail(for kind: ProviderKind) -> String {
+        switch self {
+        case .ok:
+            return ""
+        case .unauthorized:
+            switch kind {
+            case .bitbucket:
+                return "Wrong username or token. Bitbucket’s API does NOT accept your account password — create an API token and use that."
+            default:
+                return "The token is wrong or expired. Generate a fresh \(kind.credentialLabel.lowercased())."
+            }
+        case .forbidden:
+            return "The credential is valid but lacks read access. Re-create it with the Repositories → Read scope."
+        case .notFound:
+            switch kind {
+            case .bitbucket: return "Workspace not found. Use the workspace slug from the URL (bitbucket.org/<slug>), not the display name."
+            case .github:    return "Organization not found. Check the org slug."
+            case .gitlab:    return "Host not found. Check the GitLab host."
+            }
+        case .unreachable(let m):
+            return "\(m) — check your network/VPN and the host."
+        case .failed(let m):
+            return m
+        }
     }
 }

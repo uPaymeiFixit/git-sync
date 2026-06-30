@@ -76,6 +76,9 @@ struct ProvidersTab: View {
                 .environmentObject(settings)
                 .environmentObject(state)
         }
+        // Verify each configured provider's credentials when the tab opens, so
+        // the status dots are meaningful without the user opening each editor.
+        .onAppear { state.testAllUntestedProviders() }
     }
 
     private func startAdd() {
@@ -99,11 +102,43 @@ struct ProvidersTab: View {
 
 private struct ProviderRow: View {
     let provider: Provider
+    @EnvironmentObject private var state: AppState
+
+    // The status dot now reflects whether the credentials actually connect —
+    // not just whether the provider is enabled. Grey until tested; spinner
+    // while testing; green/red from the last test result.
+    private var status: ConnectionTestResult? { state.connectionStatus[provider.id] }
+    private var testing: Bool { state.connectionTesting.contains(provider.id) }
+
+    private var dotColor: Color {
+        if !provider.enabled { return .secondary }
+        guard let status else { return .secondary }   // untested
+        return status.isOK ? .green : .red
+    }
+    private var dotHelp: String {
+        if !provider.enabled { return "Disabled" }
+        if testing { return "Testing…" }
+        guard let status else { return "Not tested yet — open to Test Connection" }
+        return status.isOK ? status.headline : "\(status.headline) — \(status.detail(for: provider.kind))"
+    }
+
+    // Hollow circle = untested (we don't know yet); filled = we have a verdict
+    // (enabled-but-untested still hollow so "never checked" reads distinctly
+    // from "checked, green").
+    private var dotSymbol: String {
+        (status == nil && provider.enabled) ? "circle" : "circle.fill"
+    }
+
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: provider.enabled ? "circle.fill" : "circle")
-                .font(.system(size: 8))
-                .foregroundStyle(provider.enabled ? Color.green : Color.secondary)
+            if testing {
+                ProgressView().controlSize(.small).frame(width: 8, height: 8)
+            } else {
+                Image(systemName: dotSymbol)
+                    .font(.system(size: 8))
+                    .foregroundStyle(dotColor)
+                    .help(dotHelp)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(provider.name).font(.body)
                 Text("\(provider.kind.titleName) · \(provider.scope.isEmpty ? provider.host : provider.scope) · \(provider.localPath)")
@@ -113,6 +148,9 @@ private struct ProviderRow: View {
             if !provider.isConfigured {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     .help("Missing required settings")
+            } else if let status, !status.isOK {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    .help(status.detail(for: provider.kind))
             }
         }
         .padding(.vertical, 2)
@@ -129,12 +167,24 @@ private struct ProviderEditor: View {
     @State private var draft: Provider
     @State private var token: String
     @State private var validation = ProviderStore.ProviderValidation.ok
+    @State private var testResult: ConnectionTestResult?
+    @State private var testing = false
     let isNew: Bool
 
     init(initial: Provider, isNew: Bool) {
         _draft = State(initialValue: initial)
         _token = State(initialValue: "")   // loaded onAppear (Keychain)
         self.isNew = isNew
+    }
+
+    // Where to create this provider's credential. GitLab's page is
+    // host-specific, so build it from the entered host; the rest are fixed.
+    private var credentialURL: URL? {
+        if draft.kind == .gitlab {
+            let h = draft.host.trimmingCharacters(in: .whitespaces)
+            return h.isEmpty ? nil : URL(string: "https://\(h)/-/user_settings/personal_access_tokens")
+        }
+        return draft.kind.credentialURL
     }
 
     var body: some View {
@@ -168,11 +218,43 @@ private struct ProviderEditor: View {
                                      prompt: draft.kind == .github ? "your-org" : "your-workspace")
                     }
                     if draft.kind == .bitbucket {
-                        LabeledField(label: "Username", value: $draft.bitbucketUser, prompt: "you")
+                        LabeledField(label: "Username", value: $draft.bitbucketUser, prompt: "your-username")
                     }
-                    LabeledSecureField(label: draft.kind == .bitbucket ? "App password" : "Personal access token",
-                                       value: $token, prompt: "", generateURL: nil)
+                    LabeledSecureField(label: draft.kind.credentialLabel,
+                                       value: $token, prompt: "", generateURL: credentialURL)
+                    Text(draft.kind.credentialHelp)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Toggle("Include archived repos", isOn: $draft.includeArchived).toggleStyle(.checkbox)
+
+                    // Test connection — the fix for the "silently syncs nothing"
+                    // failure mode. Hits the API with these exact credentials and
+                    // reports what's actually wrong (401/403/404/unreachable).
+                    HStack(spacing: 8) {
+                        Button {
+                            runTest()
+                        } label: {
+                            if testing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("Test Connection")
+                            }
+                        }
+                        .disabled(testing)
+                        if let r = testResult {
+                            Label(r.headline, systemImage: r.isOK ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(r.isOK ? Color.green : Color.red)
+                                .lineLimit(1).truncationMode(.tail)
+                        }
+                    }
+                    if let r = testResult, !r.isOK {
+                        let d = r.detail(for: draft.kind)
+                        if !d.isEmpty {
+                            Text(d).font(.caption).foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
                 Section("Sync location") {
                     FolderField(value: $draft.localPath, prompt: "/Users/you/git/Provider")
@@ -198,6 +280,14 @@ private struct ProviderEditor: View {
                 }
             }
             .formStyle(.grouped)
+            // A stale "Connected" check is worse than none — clear the result
+            // whenever a credential field changes so the dot always reflects
+            // the values currently on screen.
+            .onChange(of: token) { testResult = nil }
+            .onChange(of: draft.host) { testResult = nil }
+            .onChange(of: draft.scope) { testResult = nil }
+            .onChange(of: draft.bitbucketUser) { testResult = nil }
+            .onChange(of: draft.kind) { testResult = nil }
             Divider()
             HStack {
                 Spacer()
@@ -209,7 +299,12 @@ private struct ProviderEditor: View {
             .padding(12)
         }
         .frame(width: 520, height: 560)
-        .onAppear { token = providers.token(for: draft) }
+        .onAppear {
+            token = providers.token(for: draft)
+            // Restore the last known connection result for an existing provider
+            // so reopening the editor shows its current status.
+            if !isNew { testResult = state.connectionStatus[draft.id] }
+        }
     }
 
     private func save() {
@@ -217,5 +312,31 @@ private struct ProviderEditor: View {
         validation = v
         guard v.isValid else { return }
         dismiss()
+    }
+
+    // Run the authenticated probe off the main thread (it's a blocking network
+    // call), then publish the result back on the main actor for the UI.
+    private func runTest() {
+        testing = true
+        testResult = nil
+        let kind = draft.kind
+        let host = draft.host
+        let scope = draft.scope
+        let user = draft.bitbucketUser
+        let secret = token
+        let archived = draft.includeArchived
+        let id = draft.id
+        Task.detached {
+            let result = ConnectionTester.test(
+                kind: kind, host: host, scope: scope,
+                bitbucketUser: user, token: secret, includeArchived: archived)
+            await MainActor.run {
+                testResult = result
+                testing = false
+                // Mirror into AppState so the list's status dot reflects this
+                // test once the editor closes (matches what the user just saw).
+                state.connectionStatus[id] = result
+            }
+        }
     }
 }

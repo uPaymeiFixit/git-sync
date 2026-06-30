@@ -59,6 +59,45 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable {
         case .bitbucket: return "Bitbucket"
         }
     }
+
+    // ---- Credential guidance -----------------------------------------
+    // What kind of secret each platform actually wants, where to create it,
+    // and which scopes to grant. The old UI labelled every secret the same
+    // ("App password") which steered Bitbucket users toward their account
+    // password (which the API has never accepted) and is being sunset anyway
+    // in favour of API tokens.
+
+    // The label for the secret field (what the user is pasting in).
+    var credentialLabel: String {
+        switch self {
+        case .gitlab:    return "Personal access token"
+        case .github:    return "Personal access token"
+        case .bitbucket: return "API token"
+        }
+    }
+
+    // One-line guidance shown under the secret field: what to use and the
+    // scopes it needs. Bitbucket explicitly warns off the account password.
+    var credentialHelp: String {
+        switch self {
+        case .gitlab:
+            return "A GitLab personal access token with the read_api and read_repository scopes. Not your account password."
+        case .github:
+            return "A GitHub token. Classic: the repo scope. Fine-grained: Contents → Read and Metadata → Read. Not your account password."
+        case .bitbucket:
+            return "An Atlassian API token (or an app password) with Repositories → Read. NOT your Bitbucket account password — the API rejects it (401)."
+        }
+    }
+
+    // Where to create the credential. Opened by the link button next to the
+    // secret field. nil = host-specific (GitLab), filled in by the view.
+    var credentialURL: URL? {
+        switch self {
+        case .gitlab:    return nil   // https://<host>/-/user_settings/personal_access_tokens
+        case .github:    return URL(string: "https://github.com/settings/tokens")
+        case .bitbucket: return URL(string: "https://id.atlassian.com/manage-profile/security/api-tokens")
+        }
+    }
 }
 
 struct Provider: Identifiable, Codable, Sendable, Hashable {
