@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>GitSync</title>
+        <link>https://raw.githubusercontent.com/uPaymeiFixit/git-sync/main/appcast.xml</link>
+        <description>GitSync software updates</description>
+        <language>en</language>
+        <item>
+            <title>Version 1.2.0</title>
+            <link>https://github.com/uPaymeiFixit/git-sync</link>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+            <sparkle:releaseNotesLink>https://github.com/uPaymeiFixit/git-sync/releases/tag/v1.2.0</sparkle:releaseNotesLink>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <pubDate>Tue, 30 Jun 2026 23:10:04 +0000</pubDate>
+            <enclosure url="https://github.com/uPaymeiFixit/git-sync/releases/download/v1.2.0/GitSync-v1.2.0.zip" type="application/octet-stream" sparkle:edSignature="YZ29ClOxJz7GhKXbNloWtk/yYiilsAeHiKX7iHF/EhE3Lm3+hbP0OiZGM/PL0vKRT4XiY5R4evWN1/6sRBPeDQ==" length="2997755" />
+        </item>
+    </channel>
+</rss>
