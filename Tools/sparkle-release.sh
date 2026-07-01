@@ -62,12 +62,22 @@ if [[ -f "${APPCAST}" ]]; then
     # first existing <item>, or before </channel> if there are none).
     echo "» inserting item into existing ${APPCAST}"
     tmp="$(mktemp)"
-    awk -v item="${ITEM}" '
-        !done && /<item>/    { print item; print; done=1; next }
-        !done && /<\/channel>/ { print item; print; done=1; next }
+    itemfile="$(mktemp)"
+    printf '%s\n' "${ITEM}" > "${itemfile}"
+    # NOTE: the item is spliced in from a FILE via getline, NOT passed with
+    # `awk -v item=...`. BSD awk (the macOS default) rejects a literal newline
+    # inside a -v string assignment ("newline in string") — the multi-line item
+    # tripped that and left the appcast un-updated. Reading the block from a file
+    # is portable across BSD/GNU awk and needs no escaping of the item's quotes,
+    # ampersands, or slashes.
+    awk -v f="${itemfile}" '
+        function emit_item(   line) { while ((getline line < f) > 0) print line; close(f) }
+        !done && /<item>/      { emit_item(); print; done=1; next }
+        !done && /<\/channel>/ { emit_item(); print; done=1; next }
         { print }
     ' "${APPCAST}" > "${tmp}"
     mv "${tmp}" "${APPCAST}"
+    rm -f "${itemfile}"
 else
     echo "» creating ${APPCAST}"
     cat > "${APPCAST}" <<EOF
