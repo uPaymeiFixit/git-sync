@@ -27,6 +27,8 @@ struct DiscoveryResult: Sendable {
 enum ConnectionTestResult: Sendable, Equatable {
     case ok(reposVisible: Int?)   // authenticated; optionally how many repos we saw
     case unauthorized             // 401 — wrong username/token (Bitbucket: account password)
+    case missingScopes            // 401, but the token authenticated — it just has NO scopes
+                                  // (Bitbucket "Create API token" w/o scopes; see detectBitbucketNoScopes)
     case forbidden                // 403 — token lacks the required scope
     case notFound                 // 404 — wrong workspace/org/host slug
     case unreachable(String)      // transport-level (VPN down, DNS, refused)
@@ -55,11 +57,15 @@ protocol PlatformDiscovery: Sendable {
 }
 
 // Shared classifier: run one authenticated single-item GET and map the result
-// to a ConnectionTestResult. `countKey` (when set) lets a client report how
-// many repos the workspace/org has, parsed from the JSON body.
+// to a ConnectionTestResult. `countFrom` (when set) lets a client report how
+// many repos the workspace/org has, parsed from the JSON body. `refine401`
+// (when set) inspects the 401 response body to distinguish sub-cases — e.g.
+// Bitbucket returns a specific body when the token authenticated but carries no
+// scopes, which reads very differently to the user than "wrong credentials".
 func classifyAuthProbe(
     _ url: URL, headers: [String: String], accept: String,
-    countFrom: (@Sendable (Data) -> Int?)? = nil
+    countFrom: (@Sendable (Data) -> Int?)? = nil,
+    refine401: (@Sendable (Data) -> ConnectionTestResult)? = nil
 ) -> ConnectionTestResult {
     // Single attempt (no retry/backoff): a credential test should answer fast.
     do {
@@ -67,7 +73,7 @@ func classifyAuthProbe(
         return .ok(reposVisible: countFrom?(resp.body))
     } catch let e as HTTPClient.HTTPCodeError {
         switch e.code {
-        case 401: return .unauthorized
+        case 401: return refine401?(e.body) ?? .unauthorized
         case 403: return .forbidden
         case 404: return .notFound
         default:  return .failed("HTTP \(e.code)")
@@ -77,6 +83,18 @@ func classifyAuthProbe(
         // one) on transport errors — treat as unreachable.
         return .unreachable(error.localizedDescription)
     }
+}
+
+// Bitbucket-specific 401 refinement. A token created with the plain "Create API
+// token" button (no scopes) authenticates fine but the API rejects every call
+// with 401 + body {"error":{"message":"API Token provided has no Bitbucket
+// scopes."}}. A genuinely-wrong credential returns 401 with an EMPTY body. So a
+// non-empty body naming "scopes" ⇒ the friend's actual bug: right token, wrong
+// (missing) scopes. Empirically confirmed against the live API.
+func detectBitbucketNoScopes(_ body: Data) -> ConnectionTestResult {
+    let text = String(decoding: body, as: UTF8.self).lowercased()
+    if text.contains("scope") { return .missingScopes }
+    return .unauthorized
 }
 
 // Fast reachability probe: can we open a connection to `url` within `timeout`
@@ -243,6 +261,11 @@ struct GitLabClient: PlatformDiscovery {
 enum HTTPClient {
     struct HTTPCodeError: LocalizedError {
         let code: Int
+        // The response body for the failing status. Small (an error JSON), and
+        // only populated for the non-transient 401/403/404 throws below — it
+        // lets classifyAuthProbe distinguish 401 sub-cases (e.g. Bitbucket's
+        // "no scopes" body vs an empty wrong-credential body).
+        var body: Data = Data()
         var errorDescription: String? {
             switch code {
             case 401: return "HTTP 401 unauthorized — check the token / app password"
@@ -286,7 +309,7 @@ enum HTTPClient {
 
             if let http = outResp as? HTTPURLResponse {
                 if http.statusCode == 401 || http.statusCode == 403 || http.statusCode == 404 {
-                    throw HTTPCodeError(code: http.statusCode)
+                    throw HTTPCodeError(code: http.statusCode, body: outData ?? Data())
                 }
                 if (200...299).contains(http.statusCode) {
                     let link = http.value(forHTTPHeaderField: "Link") ?? ""
@@ -465,15 +488,16 @@ struct BitbucketClient: PlatformDiscovery {
 
     func testConnection() -> ConnectionTestResult {
         // One repo from the workspace. 401 = bad username/token (or the
-        // account password, which Bitbucket's API never accepts); 404 = wrong
+        // account password, which Bitbucket's API never accepts) OR a token
+        // created without scopes (refine401 tells these apart); 404 = wrong
         // workspace slug; 403 = token missing repository:read.
         guard let url = URL(string:
             "\(api)/repositories/\(workspace)?pagelen=1&fields=size,values.slug") else {
             return .failed("bad workspace")
         }
-        return classifyAuthProbe(url, headers: headers, accept: accept) { data in
+        return classifyAuthProbe(url, headers: headers, accept: accept, countFrom: { data in
             (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["size"] as? Int
-        }
+        }, refine401: detectBitbucketNoScopes)
     }
 
     // Extract the SSH clone URL from links.clone[] where name == "ssh".
@@ -534,6 +558,7 @@ extension ConnectionTestResult {
             if let n, n > 0 { return "Connected — \(n)\(n == 1 ? " repo" : "+ repos") visible" }
             return "Connected"
         case .unauthorized: return "Authentication failed (401)"
+        case .missingScopes: return "Token has no scopes"
         case .forbidden:    return "Access denied (403)"
         case .notFound:     return "Not found (404)"
         case .unreachable:  return "Couldn’t reach the host"
@@ -553,8 +578,13 @@ extension ConnectionTestResult {
             default:
                 return "The token is wrong or expired. Generate a fresh \(kind.credentialLabel.lowercased())."
             }
+        case .missingScopes:
+            // Bitbucket-only in practice: the token is valid but was created
+            // without scopes (the plain "Create API token" button). Name the
+            // exact scopes so they don't have to guess.
+            return "The token is valid but has no scopes. On id.atlassian.com use “Create API token with scopes”, select Bitbucket, and grant read:repository:bitbucket and read:workspace:bitbucket."
         case .forbidden:
-            return "The credential is valid but lacks read access. Re-create it with the Repositories → Read scope."
+            return "The credential is valid but lacks read access. Re-create it with the Repositories → Read scope (Bitbucket: read:repository:bitbucket + read:workspace:bitbucket)."
         case .notFound:
             switch kind {
             case .bitbucket: return "Workspace not found. Use the workspace slug from the URL (bitbucket.org/<slug>), not the display name."

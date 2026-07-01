@@ -82,44 +82,45 @@ private struct BehaviorTab: View {
 
 private struct ScheduleTab: View {
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var updater: SparkleUpdater
     @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
+
+    // The single on/off that used to be the "Manual / Every N / Daily" picker.
+    // With "Daily at time" gone, the choice is binary — automatic or not — so a
+    // checkbox reads cleaner than a segmented control. On ⇒ .everyNHours,
+    // off ⇒ .manualOnly. The interval stepper below it is the only knob.
+    private var autoSync: Binding<Bool> {
+        Binding(
+            get: { settings.scheduleMode == .everyNHours },
+            set: { settings.scheduleMode = $0 ? .everyNHours : .manualOnly }
+        )
+    }
 
     var body: some View {
         Form {
-            Section {
-                Picker("Mode", selection: $settings.scheduleMode) {
-                    ForEach(ScheduleMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
+            Section("Sync") {
+                Toggle("Sync automatically", isOn: autoSync)
+                    .toggleStyle(.checkbox)
+                LabeledContent("Every") {
+                    Stepper(value: $settings.scheduleHours, in: 1...168) {
+                        Text("\(settings.scheduleHours) hour(s)")
                     }
                 }
-                .pickerStyle(.segmented)
-
-                switch settings.scheduleMode {
-                case .manualOnly:
-                    Text("Runs only when you click 'Run now'.")
-                        .foregroundStyle(.secondary)
-                case .everyNHours:
-                    LabeledContent("Every") {
-                        Stepper(value: $settings.scheduleHours, in: 1...168) {
-                            Text("\(settings.scheduleHours) hour(s)")
-                        }
-                    }
-                case .dailyAt:
-                    LabeledContent("Daily at") {
-                        HStack {
-                            Stepper(value: $settings.scheduleDailyHour, in: 0...23) {
-                                Text(String(format: "%02d", settings.scheduleDailyHour))
-                            }
-                            Text(":")
-                            Stepper(value: $settings.scheduleDailyMinute, in: 0...59, step: 5) {
-                                Text(String(format: "%02d", settings.scheduleDailyMinute))
-                            }
-                        }
-                    }
-                }
+                .disabled(settings.scheduleMode != .everyNHours)
+                Text(settings.scheduleMode == .everyNHours
+                     ? "Missed runs (Mac asleep or off) catch up automatically on the next wake or launch."
+                     : "Syncs only when you click “Run now”.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section {
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
+                    .toggleStyle(.checkbox)
+                Text("Checks in the background and offers new versions as they’re released. You can always check manually from the menu.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Startup") {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .toggleStyle(.checkbox)
                     .onChange(of: launchAtLogin) { _, newValue in

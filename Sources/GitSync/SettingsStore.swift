@@ -114,8 +114,26 @@ final class SettingsStore: ObservableObject {
         self.parallel           = d.object(forKey: DKey.parallel) as? Int ?? 128
         self.timeout            = d.object(forKey: DKey.timeout) as? Int ?? 1800
         self.depth              = d.object(forKey: DKey.depth) as? Int ?? 100
-        self.scheduleMode       = ScheduleMode(rawValue: d.string(forKey: DKey.scheduleMode) ?? "")
-            ?? .manualOnly
+        // The "Daily at time" mode was removed: with per-platform retry/catch-up,
+        // an every-N-hours cadence already covers "sync roughly once a day" and
+        // recovers missed fires, so a fixed wall-clock time added nothing but a
+        // third mode to reason about. Migrate any persisted .dailyAt to
+        // .everyNHours (the value stays valid in the enum for decode safety, but
+        // the UI no longer offers or persists it).
+        let storedMode = ScheduleMode(rawValue: d.string(forKey: DKey.scheduleMode) ?? "") ?? .manualOnly
+        let migratedMode: ScheduleMode = (storedMode == .dailyAt) ? .everyNHours : storedMode
+        self.scheduleMode = migratedMode
+        // HEAL the on-disk value, not just the in-memory one. Assigning
+        // scheduleMode above does NOT fire its didSet (Swift skips observers for
+        // init-time stores), so the persisted raw value would stay "daily"
+        // forever and the migration would re-run every launch. Worse, if the
+        // .dailyAt case is ever removed, that stale "daily" would fail to decode
+        // and fall back to .manualOnly (line above) — silently disabling
+        // automatic sync for a user who had daily scheduling. Write the
+        // corrected value once so the disk state actually reflects the migration.
+        if storedMode == .dailyAt {
+            d.set(migratedMode.rawValue, forKey: DKey.scheduleMode)
+        }
         self.scheduleHours      = d.object(forKey: DKey.scheduleHours) as? Int ?? 4
         self.scheduleDailyHour  = d.object(forKey: DKey.scheduleDailyHour) as? Int ?? 9
         self.scheduleDailyMinute = d.object(forKey: DKey.scheduleDailyMinute) as? Int ?? 0
@@ -169,6 +187,9 @@ final class SettingsStore: ObservableObject {
 enum ScheduleMode: String, CaseIterable, Identifiable {
     case manualOnly = "manual"
     case everyNHours = "everyN"
+    // Retired from the UI (see SettingsStore.init migration + ScheduleTab). The
+    // case is kept so a pre-migration persisted "daily" raw value still decodes,
+    // and so the Scheduler's exhaustive switches stay total; nothing writes it.
     case dailyAt = "daily"
 
     var id: String { rawValue }

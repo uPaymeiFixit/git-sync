@@ -53,6 +53,37 @@ enum ConnectionTest {
         check("403 mentions a missing read scope",
               any403.lowercased().contains("read"), any403)
 
+        // ---- Bitbucket no-scopes 401 discrimination (the friend's 2nd bug) ---
+        // A token from the plain "Create API token" button authenticates but
+        // returns 401 + this exact body; a wrong credential returns 401 + empty.
+        // detectBitbucketNoScopes must tell them apart from the body alone.
+        let noScopesBody = Data(#"{"type": "error", "error": {"message": "API Token provided has no Bitbucket scopes."}}"#.utf8)
+        check("no-scopes body → .missingScopes",
+              detectBitbucketNoScopes(noScopesBody) == .missingScopes)
+        check("empty 401 body → .unauthorized (wrong credential)",
+              detectBitbucketNoScopes(Data()) == .unauthorized)
+        check("unrelated 401 body → .unauthorized",
+              detectBitbucketNoScopes(Data(#"{"error":{"message":"Access denied"}}"#.utf8)) == .unauthorized)
+
+        check(".missingScopes is not OK", !ConnectionTestResult.missingScopes.isOK)
+        check(".missingScopes headline mentions scopes",
+              ConnectionTestResult.missingScopes.headline.lowercased().contains("scope"))
+        let scopesDetail = ConnectionTestResult.missingScopes.detail(for: .bitbucket)
+        check(".missingScopes detail names read:repository:bitbucket",
+              scopesDetail.contains("read:repository:bitbucket"), scopesDetail)
+        check(".missingScopes detail names read:workspace:bitbucket",
+              scopesDetail.contains("read:workspace:bitbucket"), scopesDetail)
+        check(".missingScopes detail points at the scoped-token button",
+              scopesDetail.lowercased().contains("with scopes"), scopesDetail)
+
+        // The scopes must also be documented in the credential help the user
+        // reads BEFORE hitting the error (so ideally they never hit it).
+        let bbHelp = ProviderKind.bitbucket.credentialHelp
+        check("Bitbucket help names read:repository:bitbucket",
+              bbHelp.contains("read:repository:bitbucket"), bbHelp)
+        check("Bitbucket help names read:workspace:bitbucket",
+              bbHelp.contains("read:workspace:bitbucket"), bbHelp)
+
         // ---- Credential guidance per kind --------------------------------
 
         check("Bitbucket credential label is 'API token' (not 'App password')",

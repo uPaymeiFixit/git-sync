@@ -85,7 +85,7 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable {
         case .github:
             return "A GitHub token. Classic: the repo scope. Fine-grained: Contents → Read and Metadata → Read. Not your account password."
         case .bitbucket:
-            return "An Atlassian API token (or an app password) with Repositories → Read. NOT your Bitbucket account password — the API rejects it (401)."
+            return "An Atlassian API token created with “Create API token with scopes” (NOT the plain “Create API token” — that one has no scopes and 401s). Select Bitbucket and grant read:repository:bitbucket + read:workspace:bitbucket. Not your account password."
         }
     }
 

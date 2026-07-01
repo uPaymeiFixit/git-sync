@@ -16,11 +16,13 @@ final class ProviderStore: ObservableObject {
     private let defaultsKey = "providersV1"
     private let migratedKey = "providersMigratedFromLegacy"
     private let skipMigratedKey = "providersSkipMigratedFromGlobal"
+    private let legacyCleanupKey = "providersLegacyKeychainCleanedUp"
 
     init() {
         load()
         migrateFromLegacyIfNeeded()
         migrateGlobalSkipIfNeeded()
+        cleanUpLegacyKeychainIfNeeded()
     }
 
     // ---- CRUD --------------------------------------------------------
@@ -183,10 +185,13 @@ final class ProviderStore: ObservableObject {
     // that existed before this feature, so nothing changes for existing users.
     private func migrateFromLegacyIfNeeded() {
         let d = UserDefaults.standard
-        // Even if the initial migration already ran, BACKFILL any provider
-        // whose per-provider token is empty from the (correctly-named) legacy
-        // key — repairs the wrong-key bug for users already migrated.
-        backfillMissingTokens()
+        // NOTE: the every-launch backfill call that used to live here was the
+        // cause of the "three password prompts on every relaunch" bug — it read
+        // the legacy Keychain keys on every launch, and each rebuild's new code
+        // signature re-triggered the login-keychain ACL prompt. The backfill +
+        // legacy-key repair is now a ONE-TIME, gated step in
+        // cleanUpLegacyKeychainIfNeeded() (called once, flag-guarded), which
+        // also DELETES the legacy keys so they can never prompt again.
 
         // Already migrated, or the user already has providers → nothing to do.
         guard !d.bool(forKey: migratedKey) else { return }
@@ -234,7 +239,9 @@ final class ProviderStore: ObservableObject {
         providers = migrated
         save()
         d.set(true, forKey: migratedKey)
-        backfillMissingTokens()   // copy tokens into the just-created providers
+        // Tokens are copied into the just-created providers (and the legacy keys
+        // then deleted) by cleanUpLegacyKeychainIfNeeded(), which init() calls
+        // right after this — no separate backfill needed here.
     }
 
     // Skip patterns used to be one global GIT_SYNC_SKIP list shared by every
@@ -256,15 +263,46 @@ final class ProviderStore: ObservableObject {
         d.set(true, forKey: skipMigratedKey)
     }
 
-    // For each provider with an empty per-provider token, copy from the legacy
-    // single-per-kind Keychain key. Idempotent + safe to run every launch:
-    // does nothing once a provider has its own token. This is what repairs the
-    // already-migrated user whose tokens didn't copy due to the wrong-key bug.
-    private func backfillMissingTokens() {
+    // ONE-TIME legacy-Keychain cleanup. This replaces the old every-launch
+    // backfillMissingTokens(), which caused THREE password prompts on every
+    // relaunch: it read the legacy single-per-kind keys (gitlab_token /
+    // github_token / bitbucket_app_password) on each launch, and every rebuild's
+    // new code signature re-triggered the login-keychain ACL prompt for each.
+    //
+    // This runs once (flag-guarded), and does two things:
+    //   1. BACKFILL: for any provider whose per-provider token is empty, copy the
+    //      value from its legacy key — the repair for users whose migration
+    //      didn't copy tokens due to the old wrong-key bug.
+    //   2. DELETE the legacy keys afterward, so they can never be read (or
+    //      prompted for) again. The per-provider items are the sole source of
+    //      truth after this.
+    //
+    // Setting the flag unconditionally after one sweep is correct: any legacy key
+    // that still holds a value we couldn't place (no matching provider) is
+    // deleted too — it's dead data from a pre-provider config, and keeping it
+    // around only risks another prompt. A provider left with an empty token after
+    // this simply has no credential and the user re-enters it in Settings (the
+    // Test Connection flow now makes that obvious).
+    private func cleanUpLegacyKeychainIfNeeded() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: legacyCleanupKey) else { return }
+
+        // 1. Backfill empty per-provider tokens from the matching legacy key.
         for p in providers where token(for: p).isEmpty {
             if let tok = Keychain.get(LegacyKeychainKey.forKind(p.kind)), !tok.isEmpty {
                 Keychain.set(tok, for: p.tokenKeychainKey)
             }
         }
+
+        // 2. Delete ALL legacy keys — their values are now either copied into a
+        //    per-provider item or genuinely orphaned. Either way they must not
+        //    linger and prompt. Keychain.set(nil,) deletes.
+        for key in [LegacyKeychainKey.gitlabToken,
+                    LegacyKeychainKey.githubToken,
+                    LegacyKeychainKey.bitbucketPassword] {
+            Keychain.set(nil, for: key)
+        }
+
+        d.set(true, forKey: legacyCleanupKey)
     }
 }

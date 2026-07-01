@@ -25,12 +25,31 @@ final class SparkleUpdater: ObservableObject {
     @Published private(set) var canCheck = true
     private var observation: NSKeyValueObservation?
 
+    // Whether Sparkle checks for updates on its own schedule (background). This
+    // is Sparkle's OWN persisted preference (app UserDefaults, SUEnableAutomaticChecks
+    // key) — we don't store it ourselves; we just mirror it into a @Published so
+    // a SwiftUI Toggle can bind to it. Info.plist ships SUEnableAutomaticChecks=false,
+    // so the default is off; flipping this Toggle is what turns background checks on.
+    @Published var automaticallyChecks: Bool {
+        didSet {
+            // Also fires when we mirror Sparkle→us in init; the guard keeps that
+            // from being a redundant write (harmless, but avoids churn).
+            if controller.updater.automaticallyChecksForUpdates != automaticallyChecks {
+                controller.updater.automaticallyChecksForUpdates = automaticallyChecks
+            }
+        }
+    }
+
     init() {
         // startingUpdater: true begins the updater immediately (it reads
         // Info.plist's SUFeedURL / SUPublicEDKey). No custom delegate needed —
         // the standard driver covers the whole UX.
-        controller = SPUStandardUpdaterController(
+        let controller = SPUStandardUpdaterController(
             startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        self.controller = controller
+        // Seed from Sparkle's current (persisted) preference before any @Published
+        // observers run, so the Toggle opens showing the real state.
+        self.automaticallyChecks = controller.updater.automaticallyChecksForUpdates
 
         observation = controller.updater.observe(\.canCheckForUpdates, options: [.initial, .new]) {
             [weak self] updater, _ in

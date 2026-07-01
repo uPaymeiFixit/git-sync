@@ -40,8 +40,8 @@ branches are reported, not touched.
 - **Fast.** A pure-Swift engine drives git directly with a large worker pool —
   thousands of repos in a couple of minutes, with a live "what's each worker
   doing right now" panel so a stall is obvious.
-- **Schedule-aware.** Every-N-hours or daily, with sleep-aware catch-up for runs
-  missed while your Mac was asleep, and Launch at Login. A host that's
+- **Schedule-aware.** Sync automatically every N hours, with sleep-aware catch-up
+  for runs missed while your Mac was asleep, and Launch at Login. A host that's
   unreachable (VPN down) is isolated and retried cheaply — it never drags the
   others down or touches your repos.
 - **No config files.** Everything lives in the app; tokens go in the macOS
@@ -102,7 +102,16 @@ manage everything in **Settings → Providers** (⌘,). Add a provider per sourc
 | --- | --- | --- |
 | **GitLab** | Instance **Host** (e.g. `gitlab.example.com`) + a personal access token | `read_api`, `read_repository` |
 | **GitHub** | The **Organization** + a token | Classic: `repo` · Fine-grained: `Contents: Read`, `Metadata: Read` |
-| **Bitbucket** | The **Workspace** slug + your **Username** + an **App password** | `read:repository:bitbucket` |
+| **Bitbucket** | The **Workspace** slug + your **Username** + an **API token** | `read:repository:bitbucket`, `read:workspace:bitbucket` |
+
+> **Bitbucket, read this.** Create the token at
+> [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens)
+> with **“Create API token *with scopes*”** — not the plain “Create API token”
+> button next to it. The plain button makes a token with **no scopes**, which
+> authenticates but then 401s on every call (GitSync now flags this specifically
+> as “Token has no scopes”). Pick **Bitbucket** and grant
+> `read:repository:bitbucket` + `read:workspace:bitbucket`. Your Bitbucket
+> **account password** never works — the API rejects it.
 
 Each provider also has its own **disk folder**, **skip patterns**, an **Include
 archived repos** toggle, and a **sync scope** (sync everything, or only repos
@@ -110,7 +119,8 @@ you've explicitly tracked). Tokens are stored in the macOS Keychain — never on
 disk in plain text.
 
 Other settings live under **Behavior** (parallel workers, clone depth, network
-timeout) and **Schedule** (manual / every-N-hours / daily, plus Launch at Login).
+timeout) and **Schedule** (sync automatically every N hours, automatic
+update checks, and Launch at Login).
 
 ### Skipping repos
 
@@ -221,6 +231,8 @@ own diagnostic modes:
 .../Contents/MacOS/GitSync --provider-validation-test   # provider folder-collision guard
 .../Contents/MacOS/GitSync --abort-reset-test           # cancel doesn't poison later syncs
 .../Contents/MacOS/GitSync --scheduler-test             # due/catch-up logic
+.../Contents/MacOS/GitSync --connection-test            # credential test + error classification
+.../Contents/MacOS/GitSync --legacy-keychain-cleanup-test  # one-time legacy-token cleanup (no repeat prompts)
 ```
 
 </details>

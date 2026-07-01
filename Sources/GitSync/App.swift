@@ -62,6 +62,9 @@ struct GitSyncApp: App {
         if args.contains("--connection-test") {
             exit(ConnectionTest.run())
         }
+        if args.contains("--legacy-keychain-cleanup-test") {
+            exit(LegacyKeychainCleanupTest.run())
+        }
 
         // Order matters: settings + inventory must exist before AppState so the
         // engine picks up the user's stored settings and the inventory store can
@@ -127,10 +130,9 @@ struct GitSyncApp: App {
                 .environmentObject(state)
                 .environmentObject(inventory)
                 .environmentObject(providers)
+                .environmentObject(updater)
                 .onChange(of: settings.scheduleMode) { _, _ in state.rescheduleIfNeeded() }
                 .onChange(of: settings.scheduleHours) { _, _ in state.rescheduleIfNeeded() }
-                .onChange(of: settings.scheduleDailyHour) { _, _ in state.rescheduleIfNeeded() }
-                .onChange(of: settings.scheduleDailyMinute) { _, _ in state.rescheduleIfNeeded() }
         }
 
         Window("Set Up GitSync", id: "onboarding") {
