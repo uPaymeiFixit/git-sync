@@ -82,10 +82,11 @@ struct ProvidersTab: View {
     }
 
     private func startAdd() {
-        let base = (settings.syncRoot as NSString).expandingTildeInPath
+        // No default folder — the user must pick one before saving (validation
+        // rejects an empty localPath). A guessed default was more likely wrong
+        // than right and added a whole "Locations" settings tab for one field.
         isNew = true
-        editing = Provider(kind: .gitlab, name: "New Provider",
-                           localPath: (base as NSString).appendingPathComponent("NewProvider"))
+        editing = Provider(kind: .gitlab, name: "New Provider", localPath: "")
     }
     private func startEdit(_ p: Provider) { isNew = false; editing = p }
 

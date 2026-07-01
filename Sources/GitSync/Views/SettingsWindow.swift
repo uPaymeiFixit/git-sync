@@ -10,10 +10,10 @@ struct SettingsWindow: View {
         // and the tab-bar icons jitter a few pixels. A constant content size
         // keeps the measurement — and the tab bar — stable.
         TabView {
-            PathsTab().tabContentFrame().tabItem { Label("Locations", systemImage: "folder") }
             ProvidersTab().tabContentFrame().tabItem { Label("Providers", systemImage: "rectangle.connected.to.line.below") }
             BehaviorTab().tabContentFrame().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
             ScheduleTab().tabContentFrame().tabItem { Label("Schedule", systemImage: "clock") }
+            AboutTab().tabContentFrame().tabItem { Label("About", systemImage: "info.circle") }
         }
         .frame(width: 580, height: 460)
         .padding()
@@ -34,23 +34,20 @@ private extension View {
 
 // MARK: - Tabs
 
-private struct PathsTab: View {
-    @EnvironmentObject private var settings: SettingsStore
-    var body: some View {
-        Form {
-            Section("Default location") {
-                FolderField(value: $settings.syncRoot,
-                            prompt: "/Users/you/git")
-                Text("The starting folder suggested when you add a new provider. Each provider sets its own folder under the Providers tab — that's where its repos actually clone. This is only the default the picker opens to.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
 private struct BehaviorTab: View {
     @EnvironmentObject private var settings: SettingsStore
+
+    // depth == 0 means "full history" (no --depth). The UI models that as a
+    // "Shallow clone" checkbox: off ⇒ depth 0 (full); on ⇒ a positive depth.
+    // Turning it on restores a sensible depth (100) rather than leaving 0, which
+    // would be an "on but full" contradiction; turning it off zeroes depth.
+    private var shallow: Binding<Bool> {
+        Binding(
+            get: { settings.depth > 0 },
+            set: { settings.depth = $0 ? max(1, settings.depth) : 0 }
+        )
+    }
+
     var body: some View {
         Form {
             Section {
@@ -64,15 +61,22 @@ private struct BehaviorTab: View {
                         Text("\(settings.timeout)")
                     }
                 }
-                LabeledContent("Clone depth") {
-                    Stepper(value: $settings.depth, in: 0...10000, step: 10) {
-                        Text(settings.depth == 0 ? "full history" : "\(settings.depth)")
-                    }
-                }
             }
 
-            Section {
-                Text("“Include archived repos” and “Skip patterns” are now set per provider — open the Providers tab and edit a provider.")
+            Section("Clone history") {
+                Toggle("Shallow clone", isOn: shallow)
+                    .toggleStyle(.checkbox)
+                LabeledContent("Depth") {
+                    // When shallow is off, depth is 0; the stepper's floor is 1
+                    // so it can't be dragged into the contradictory "on but 0".
+                    Stepper(value: $settings.depth, in: 1...10000, step: 10) {
+                        Text("\(max(1, settings.depth)) commit(s)")
+                    }
+                }
+                .disabled(settings.depth == 0)
+                Text(settings.depth == 0
+                     ? "Cloning full history. Slower and larger, but every commit is present."
+                     : "Cloning only the most recent commits. Faster and smaller; older history isn’t fetched.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -133,6 +137,48 @@ private struct ScheduleTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct AboutTab: View {
+    // Read straight from the bundle so this always reflects the SHIPPED build —
+    // no hardcoded version to forget to bump.
+    private var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+    private var build: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+    }
+    private static let repoURL = URL(string: "https://github.com/uPaymeiFixit/git-sync")!
+    private static let releasesURL = URL(string: "https://github.com/uPaymeiFixit/git-sync/releases")!
+
+    private var appIcon: NSImage { NSApp.applicationIconImage ?? NSImage() }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(nsImage: appIcon)
+                .resizable()
+                .frame(width: 72, height: 72)
+            VStack(spacing: 2) {
+                Text("GitSync").font(.title2.weight(.semibold))
+                Text("Version \(version) (\(build))")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Text("Mirror every repo you can access — across GitLab, GitHub, and Bitbucket — to local disk, kept in sync.")
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 360)
+            HStack(spacing: 16) {
+                Link("GitHub", destination: Self.repoURL)
+                Link("Releases", destination: Self.releasesURL)
+            }
+            .font(.callout)
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 }
 
