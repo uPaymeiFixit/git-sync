@@ -6,6 +6,16 @@
         <description>GitSync software updates</description>
         <language>en</language>
         <item>
+            <title>Version 1.2.1</title>
+            <link>https://github.com/uPaymeiFixit/git-sync</link>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.2.1</sparkle:shortVersionString>
+            <sparkle:releaseNotesLink>https://github.com/uPaymeiFixit/git-sync/releases/tag/v1.2.1</sparkle:releaseNotesLink>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <pubDate>Wed, 01 Jul 2026 20:48:38 +0000</pubDate>
+            <enclosure url="https://github.com/uPaymeiFixit/git-sync/releases/download/v1.2.1/GitSync-v1.2.1.zip" type="application/octet-stream" sparkle:edSignature="PKBQ2acohDHmTpAcxrAhDCG6dBqDY7SEldEJ624MmZYLi5RQYXoZ6IXPR1H1vDHntsoxEdi9xTvwK8gJgI+ACw==" length="3002042" />
+        </item>
+        <item>
             <title>Version 1.2.0</title>
             <link>https://github.com/uPaymeiFixit/git-sync</link>
             <sparkle:version>4</sparkle:version>
