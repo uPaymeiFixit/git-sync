@@ -120,8 +120,13 @@ private struct ScheduleTab: View {
             Section("Updates") {
                 Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
                     .toggleStyle(.checkbox)
-                Text("Checks in the background and offers new versions as they’re released. You can always check manually from the menu.")
+                Text("Checks in the background and offers new versions as they’re released.")
                     .font(.caption).foregroundStyle(.secondary)
+                // Moved here from the menu bar: it belongs next to the setting
+                // it relates to, and the menu is for things you reach for
+                // during a sync.
+                Button("Check Now…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheck)
             }
 
             Section("Startup") {

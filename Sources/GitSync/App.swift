@@ -186,7 +186,6 @@ struct GitSyncApp: App {
             Image(systemName: state.anyActivity
                   ? SpinDriver.frames[spin.frame]
                   : state.menuBarIconName)
-                .foregroundStyle(state.showsAttention ? Color.orange : Color.primary)
                 .onAppear {
                     spin.setRunning(state.anyActivity)
                     // First-launch onboarding. The menu-bar label renders at

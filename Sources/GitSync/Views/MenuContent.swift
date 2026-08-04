@@ -4,16 +4,16 @@ struct MenuContent: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var providers: ProviderStore
-    @EnvironmentObject private var updater: SparkleUpdater
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        // Status only, no "Set Up GitSync…" command: onboarding pops itself on
+        // first launch (see MenuBarIcon.onAppear) and providers are editable in
+        // Settings → Providers afterwards, so a permanent menu entry for a
+        // one-time flow was just noise. Kept as text so an unconfigured install
+        // still explains why nothing syncs.
         if !providers.isConfigured {
-            Text("Not set up yet")
-            Button("Set Up GitSync…") {
-                openWindow(id: "onboarding")
-                bringAppWindowsToFront()
-            }
+            Text("Not set up yet — add a provider in Settings")
             Divider()
         }
         if state.isRunning {
@@ -42,12 +42,6 @@ struct MenuContent: View {
         .disabled(state.anyActivity)
         .keyboardShortcut("r", modifiers: .command)
 
-        Button("Dismiss notification") {
-            state.dismissCurrentNotification()
-        }
-        .disabled(!state.showsAttention)
-        .keyboardShortcut("d", modifiers: .command)
-
         if state.isRunning {
             Button("Cancel run") {
                 state.cancelRun()
@@ -68,15 +62,6 @@ struct MenuContent: View {
         .keyboardShortcut("l", modifiers: .command)
         .help("Open a live, filtered tail of the sync/deletion log in Terminal")
 
-        if providers.isConfigured {
-            // Re-runnable setup for the already-configured (the unconfigured
-            // case shows a more prominent "Set Up GitSync…" at the top).
-            Button("Set Up GitSync…") {
-                openWindow(id: "onboarding")
-                bringAppWindowsToFront()
-            }
-        }
-
         SettingsLink {
             Text("Settings…")
         }
@@ -89,11 +74,6 @@ struct MenuContent: View {
                 bringAppWindowsToFront()
             }
         })
-
-        Button("Check for updates…") {
-            updater.checkForUpdates()
-        }
-        .disabled(!updater.canCheck)
 
         Divider()
 

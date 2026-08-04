@@ -5,7 +5,6 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var currentRun: LiveRun?
     @Published var lastRun: LiveRun?
-    @Published var dismissedRunID: UUID?
     // Per-platform live worker state during a run. Keyed by platform name;
     // each value maps `rel` (repo path under the platform root) to its
     // current phase + percentage. Empty between runs.
@@ -78,24 +77,19 @@ final class AppState: ObservableObject {
 
     func isSyncing(_ id: RepoID) -> Bool { syncingRepos.contains(id) }
 
+    // Still used by the menu's last-run summary (which reports anomalies as
+    // information). What's deliberately GONE is the attention state built on
+    // top of it: a warning-triangle menu-bar icon plus a "Dismiss notification"
+    // command. Anomalies are the steady state across thousands of repos —
+    // there's essentially always a dirty or diverged checkout somewhere — so a
+    // persistent alert icon signalled "something is wrong" permanently and
+    // trained the user to ignore it. The repositories window is where anomalies
+    // get reviewed; the menu bar just reports activity.
     var anomalyCount: Int {
         (lastRun?.outcomes ?? []).filter(\.status.isAnomaly).count
     }
 
-    var showsAttention: Bool {
-        guard let lastRun, anomalyCount > 0 else { return false }
-        return dismissedRunID != lastRun.id
-    }
-
-    var menuBarIconName: String {
-        if anyActivity    { return "arrow.triangle.2.circlepath" }
-        if showsAttention { return "exclamationmark.triangle.fill" }
-        return "arrow.triangle.2.circlepath"
-    }
-
-    func dismissCurrentNotification() {
-        dismissedRunID = lastRun?.id
-    }
+    var menuBarIconName: String { "arrow.triangle.2.circlepath" }
 
     // `only` scopes the run to a subset of platforms (the scheduler passes the
     // platforms that are actually overdue). nil = all enabled platforms (the
@@ -106,7 +100,6 @@ final class AppState: ObservableObject {
         // the authoritative gate; this is the UI-side mirror.
         guard currentRun == nil, syncingRepos.isEmpty else { return }
         currentRun = LiveRun()
-        dismissedRunID = nil
         activeWorkers = [:]
         retainDrainTimer()
         let label = only.map { $0.map(\.rawValue).sorted().joined(separator: ", ") }
