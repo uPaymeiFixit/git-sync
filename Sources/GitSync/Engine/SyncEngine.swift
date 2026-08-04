@@ -29,6 +29,11 @@ protocol EngineSink: Sendable {
 actor SyncEngine {
     private let sink: EngineSink
     private var settings: SyncSettings
+    // The single owner of provider reachability. BOTH sync paths gate on this;
+    // AppState shares the same instance so the Providers-tab status dot and the
+    // sync gate report one fact. Injected so tests can drive it without a
+    // network.
+    let health: ProviderHealth
 
     // Two-lane state: a full run is exclusive; any number of individual
     // per-repo syncs run in parallel.
@@ -38,9 +43,10 @@ actor SyncEngine {
     private var individualTasks: [RepoID: Task<Void, Never>] = [:]
     private var aborted = false
 
-    init(settings: SyncSettings, sink: EngineSink) {
+    init(settings: SyncSettings, sink: EngineSink, health: ProviderHealth = ProviderHealth()) {
         self.settings = settings
         self.sink = sink
+        self.health = health
     }
 
     func updateSettings(_ s: SyncSettings) { settings = s }
@@ -164,6 +170,43 @@ actor SyncEngine {
 
     private var providersSnapshot: [ResolvedProvider] { settings.providers }
 
+    // A remote that touches no network host: an absolute path or a file:// URL.
+    // Those are local clones (test fixtures, and a legitimate on-disk mirror),
+    // so the reachability gate must not refuse them when the provider's API host
+    // happens to be unreachable.
+    //
+    // Deliberately a strict allowlist of the two unambiguously-local forms
+    // rather than a "does it look remote?" test: everything else — scp-style
+    // "git@host:path", ssh://, https:// — falls through to the gate, which is
+    // the safe direction. A false "local" would skip the gate and reintroduce
+    // the hang; a false "remote" only costs one cached probe.
+    nonisolated static func isLocalRemote(_ sshURL: String) -> Bool {
+        sshURL.hasPrefix("file://") || sshURL.hasPrefix("/")
+    }
+
+    // The reachability gate both sync paths go through. Returns nil when the
+    // provider's host answered (proceed), or a user-facing failure detail when
+    // it did not.
+    //
+    // This is deliberately the ONLY place either path asks the question, and
+    // ProviderHealth caches/collapses the probe — so a 31-repo individual-sync
+    // burst on a down VPN pays one 8s probe total, not 31, and every repo after
+    // the first fails from cache in microseconds.
+    //
+    // The probe runs off the actor (it's up to ~8s of network I/O): holding the
+    // SyncEngine actor across it would block startFullRun/syncRepo/cancel for
+    // the duration, which would among other things make Cancel unresponsive
+    // exactly when a user on a dead VPN reaches for it.
+    private func unreachableDetail(providerID: String, probeURL: URL?) async -> String? {
+        guard probeURL != nil else { return nil }
+        let health = self.health
+        let state = await Task.detached(priority: .userInitiated) {
+            health.reachable(providerID: providerID, probeURL: probeURL)
+        }.value
+        if state.isReachable { return nil }
+        return state.detail ?? "host did not respond"
+    }
+
     // Immutable, Sendable snapshot of the actor config the per-repo git work
     // needs. Captured ONCE on the actor before fan-out, then handed to the
     // nonisolated worker so each repo's clone/fetch runs OFF the actor — that
@@ -265,13 +308,15 @@ actor SyncEngine {
 
         for unit in units {
             if aborted { break }
-            // Fast reachability probe before the expensive discovery (VPN-down
-            // fails in ~8s, not ~5min). Isolated per provider.
-            if let probe = unit.client.probeURL {
+            // Fast reachability gate before the expensive discovery (VPN-down
+            // fails in ~8s, not ~5min). Isolated per provider, and shared with
+            // the individual-sync path via ProviderHealth.
+            if unit.client.probeURL != nil {
                 await sink.emit(.phase(label: "Checking \(unit.title)…"))
-                if !hostReachable(probe) {
+                if let detail = await unreachableDetail(providerID: unit.providerID,
+                                                        probeURL: unit.client.probeURL) {
                     complete[key(unit)] = false
-                    await sink.logLine("\(unit.title) unreachable (host did not respond — VPN down?)",
+                    await sink.logLine("\(unit.title) unreachable (\(detail) — VPN down?)",
                                        platform: unit.kind.rawValue)
                     await sink.platformFinished(unit.kind.rawValue, exitCode: 1)
                     continue
@@ -416,6 +461,26 @@ actor SyncEngine {
         let destRoot = unit.destRoot            // provider folder + bare rel
         let client = unit.client
         let unitSkip = unit.skip                // this provider's own skip patterns
+
+        // Reachability gate — the SAME gate runFull uses. This is the fix for
+        // "each sync just goes infinitely on wake": without it, a per-repo sync
+        // on a down VPN went straight into discoverOne (5 HTTP attempts × 60s +
+        // ~30s backoff ≈ 5.5 min) and then into git with GIT_SYNC_TIMEOUT
+        // (1800s), emitting no progress the whole time, so the row sat on
+        // "starting" indefinitely. Now it fails in ~8s with a visible error —
+        // and for a burst of repos, only the first pays the probe.
+        //
+        // Skipped when we already hold a LOCAL remote path: the gate exists to
+        // avoid a doomed network round trip, and a file:// or absolute-path
+        // remote reaches no host at all. Probing the provider's API host would
+        // refuse a sync that is guaranteed to work offline.
+        if !(knownSSH.map(Self.isLocalRemote) ?? false) {
+            if let detail = await unreachableDetail(providerID: id.providerID,
+                                                    probeURL: client.probeURL) {
+                await failOutcome("\(unit.title) unreachable (\(detail) — VPN down?)")
+                return
+            }
+        }
 
         let mux = SSHMultiplexer(parallel: 1,
                                  pid: ProcessInfo.processInfo.processIdentifier,

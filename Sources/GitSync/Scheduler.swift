@@ -61,8 +61,29 @@ final class Scheduler {
     func start() {
         reschedule()
         observeWake()
+        observeNetworkPath()
         // Catch a run that came due while we were quit.
         fireIfDue()
+    }
+
+    // The fourth trigger: the network path changed.
+    //
+    // This is what makes a VPN reconnect actionable. Previously a VPN-down
+    // GitLab stayed permanently "due" and got re-probed on every 30-min
+    // heartbeat and every wake, forever — but when the tunnel actually came
+    // back, nothing noticed for up to 30 minutes. Now the path change itself
+    // invalidates cached reachability and re-checks catch-up immediately.
+    private func observeNetworkPath() {
+        guard let state else { return }
+        let health = state.providerHealth
+        state.pathMonitor.onChange = { [weak self] _ in
+            // Whatever we knew about reachability was learned on a DIFFERENT
+            // network. Drop it so the next gate re-probes instead of serving a
+            // cached "unreachable" through its backoff window.
+            health.invalidateAll()
+            Task { @MainActor in self?.fireIfDue() }
+        }
+        state.pathMonitor.start()
     }
 
     // Called by AppState whenever a schedule setting changes.
@@ -88,13 +109,38 @@ final class Scheduler {
         activity = a
     }
 
+    // How long a wake-triggered run waits for the network to come up before
+    // giving up on this trigger. didWakeNotification fires when the machine
+    // wakes, which is BEFORE Wi-Fi associates and well before a VPN finishes
+    // reconnecting — starting a run in that window is what produced the
+    // "syncs go infinitely on first wake" report. If the network isn't up
+    // within this window we simply don't fire: the path-change observer will
+    // fire the moment it does come up, and the heartbeat remains a backstop.
+    private static let wakeNetworkGrace: TimeInterval = 20
+
     private func observeWake() {
         guard wakeObserver == nil else { return }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.fireIfDue() }
+            Task { @MainActor in await self?.fireIfDueAfterWake() }
         }
+    }
+
+    // Wake path: reachability learned before sleep is worthless (different
+    // network, or none), so drop it, then hold briefly for the interfaces to
+    // settle before deciding anything.
+    private func fireIfDueAfterWake() async {
+        guard let state else { return }
+        state.providerHealth.invalidateAll()
+        // Cheap exit: nothing is due, so don't even wait on the network.
+        guard settings.scheduleMode != .manualOnly, !duePlatforms(asOf: Date()).isEmpty else { return }
+        let up = await state.pathMonitor.waitForPath(timeout: Self.wakeNetworkGrace)
+        guard up else {
+            RunLog.runDeferred(reason: "no network path \(Int(Self.wakeNetworkGrace))s after wake")
+            return
+        }
+        fireIfDue()
     }
 
     func noteSuccessfulRun() {
@@ -113,6 +159,16 @@ final class Scheduler {
 
         let due = duePlatforms(asOf: Date())
         guard !due.isEmpty else { return }
+        // Don't launch a run with no usable network path. The per-provider
+        // reachability gate would refuse every provider anyway, but doing it
+        // here keeps the log readable (one "deferred" line instead of a run
+        // that starts, fails every platform, and finishes with zero repos) and
+        // leaves the platforms "due" so the path-change observer retries the
+        // moment connectivity returns.
+        guard state.pathMonitor.isSatisfied else {
+            RunLog.runDeferred(reason: "no usable network path")
+            return
+        }
         state.startRun(only: due)
     }
 

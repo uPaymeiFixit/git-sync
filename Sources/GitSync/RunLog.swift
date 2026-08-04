@@ -44,6 +44,29 @@ enum RunLog {
         run.notice("\(platform, privacy: .public): \(message, privacy: .public)")
     }
 
+    // ---- Network / provider reachability -------------------------------
+
+    // Path changes are the "VPN just came up / just went away" signal. Logged
+    // because a run deferred or retried for network reasons otherwise looks
+    // like the app doing nothing for no reason.
+    static func networkPath(satisfied: Bool, changed: Bool) {
+        let state = satisfied ? "satisfied" : "unsatisfied"
+        let kind = changed ? "changed" : "updated"
+        run.info("network path \(kind, privacy: .public) — \(state, privacy: .public)")
+    }
+
+    // A sync path refused to start because the provider's host didn't answer.
+    // This is the line that distinguishes "refused in 8s" from the old
+    // behavior (stall until the 1800s git timeout with no output at all).
+    static func unreachable(provider: String, detail: String) {
+        run.notice(
+            "\(provider, privacy: .public) unreachable — \(detail, privacy: .public)")
+    }
+
+    static func runDeferred(reason: String) {
+        run.notice("run deferred — \(reason, privacy: .public)")
+    }
+
     static func runFinished(exitCodes: [String: Int32], outcomes: Int, duration: TimeInterval) {
         let codes = exitCodes.isEmpty
             ? "no platforms"

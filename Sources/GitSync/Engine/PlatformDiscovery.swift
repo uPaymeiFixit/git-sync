@@ -285,26 +285,64 @@ enum HTTPClient {
         var err: Error?
     }
 
+    // Default per-request deadline. 60s was URLRequest's default and far too
+    // long for an API call that is already behind an 8s reachability gate: on a
+    // down VPN a single discoverOne burned 5 × 60s + ~30s backoff ≈ 5.5 minutes
+    // of dead silence. These endpoints answer in well under a second when the
+    // host is actually up, so 20s is generous while keeping the worst case
+    // bounded at a value a human will wait through.
+    static let defaultTimeout: TimeInterval = 20
+
     // Synchronous GET. Returns (httpStatus, body, linkHeader). Retries on
     // transient/network errors with exponential backoff; raises HTTPCodeError
     // immediately on 401/403/404 (non-transient — retrying won't help).
     static func get(
         _ url: URL, headers: [String: String], accept: String,
-        attempts: Int = 5, backoff: Double = 2.0
+        attempts: Int = 5, backoff: Double = 2.0,
+        timeout: TimeInterval = defaultTimeout
     ) throws -> (status: Int, body: Data, link: String) {
         var delay = backoff
         var lastErr = "unknown"
         for attempt in 1...attempts {
-            var req = URLRequest(url: url, timeoutInterval: 60)
+            var req = URLRequest(url: url, timeoutInterval: timeout)
             req.setValue(accept, forHTTPHeaderField: "Accept")
             for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
 
             let sem = DispatchSemaphore(value: 0)
             let box = ResponseBox()
-            URLSession.shared.dataTask(with: req) { d, r, e in
+            // A dedicated session with an explicit RESOURCE timeout, not
+            // URLSession.shared. `timeoutInterval` on the request only bounds
+            // the idle gap between bytes; timeoutIntervalForResource bounds the
+            // whole request, which is what actually caps a connect() that
+            // stalls against a half-up VPN tunnel (the wake-time failure mode).
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.timeoutIntervalForRequest = timeout
+            cfg.timeoutIntervalForResource = timeout
+            let session = URLSession(configuration: cfg)
+            let task = session.dataTask(with: req) { d, r, e in
                 box.data = d; box.resp = r; box.err = e; sem.signal()
-            }.resume()
-            sem.wait()
+            }
+            task.resume()
+            // Bound the wait. URLSession is expected to always fire the handler
+            // at/after its own deadline, so this is a belt-and-suspenders guard
+            // against a permanently-blocked worker thread — the unbounded
+            // sem.wait() here previously meant a handler that never fired would
+            // wedge this thread forever. +2s covers handler-dispatch latency
+            // (not a second full timeout).
+            if sem.wait(timeout: .now() + timeout + 2) == .timedOut {
+                task.cancel()
+                session.invalidateAndCancel()
+                lastErr = "request exceeded \(Int(timeout))s"
+                if attempt < attempts {
+                    Thread.sleep(forTimeInterval: delay)
+                    delay *= 2
+                }
+                continue
+            }
+            // Release the session's internal delegate/queue. Without this each
+            // call leaks a session until it's collected — and this runs
+            // thousands of times per full run.
+            session.finishTasksAndInvalidate()
             let outData = box.data, outResp = box.resp, outErr = box.err
 
             if let http = outResp as? HTTPURLResponse {

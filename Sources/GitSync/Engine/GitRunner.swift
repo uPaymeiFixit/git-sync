@@ -71,6 +71,8 @@ enum GitRunner {
     // run cooperatively (checked before each attempt and during backoff).
     // `onRetry` cleans up partial state before a re-attempt (e.g. rmtree a
     // half-made clone). `onProgress` receives parsed (phase, pct) lines.
+    // `exe` defaults to git; tests inject /bin/sh to drive the retry/timeout
+    // classification directly (see StallTimeoutTest).
     static func runStreamingWithRetry(
         _ args: [String],
         env: [String: String],
@@ -79,7 +81,9 @@ enum GitRunner {
         backoff: TimeInterval = 2.0,
         isAborted: @escaping @Sendable () -> Bool = { false },
         onRetry: (() -> Void)? = nil,
-        onProgress: ProgressHandler? = nil
+        onProgress: ProgressHandler? = nil,
+        stallTimeout: TimeInterval = defaultStallTimeout,
+        exe: String = gitPath
     ) -> GitResult {
         var delay = backoff
         var lastOutput = ""
@@ -92,7 +96,8 @@ enum GitRunner {
             if attempt > 1, let onRetry { onRetry() }
 
             let r = runStreamingOnce(args, env: env, timeout: timeout,
-                                     isAborted: isAborted, onProgress: onProgress)
+                                     isAborted: isAborted, onProgress: onProgress,
+                                     exe: exe, stallTimeout: stallTimeout)
             lastOutput = r.output
             if r.timedOut {
                 // A timeout means "takes longer than `timeout`" — retrying
@@ -127,9 +132,29 @@ enum GitRunner {
         return isAborted()
     }
 
+    // How long a git child may produce NO output at all before we give up on
+    // it. This is the connect/stall deadline, deliberately separate from
+    // `timeout` (the total-transfer ceiling, GIT_SYNC_TIMEOUT = 1800s):
+    //
+    //   - 1800s is a reasonable ceiling for cloning a genuinely large repo.
+    //   - It is a terrible ceiling for "the TCP connect never completed", which
+    //     is what happens against a half-up VPN tunnel on wake. That case
+    //     produced ZERO bytes and sat for the full 30 minutes.
+    //
+    // One number cannot serve both. A repo that is actually transferring keeps
+    // resetting this deadline (every progress chunk is output), so a slow-but-
+    // live clone is unaffected and still bounded only by `timeout`. Nothing is
+    // lost by failing fast here: the retry layer above re-attempts, and a real
+    // handshake against a reachable host emits its first bytes in ~1s.
+    //
+    // 120s is far above any plausible handshake+enumeration pause (git can sit
+    // quiet during a big server-side "Enumerating objects" phase) and far below
+    // the 1800s that made this look like a hang.
+    static let defaultStallTimeout: TimeInterval = 120
+
     // One streaming attempt. Enforces `timeout` manually (Process has no
     // built-in deadline), splits output on '\n'/'\r' for progress, and kills
-    // the child on timeout or abort.
+    // the child on timeout, stall, or abort.
     // `exe` defaults to git; tests inject a different program (e.g. /bin/sh)
     // to exercise the streaming loop's exit/EOF handling directly.
     static func runStreamingOnce(
@@ -138,7 +163,8 @@ enum GitRunner {
         timeout: TimeInterval,
         isAborted: @escaping @Sendable () -> Bool,
         onProgress: ProgressHandler?,
-        exe: String = gitPath
+        exe: String = gitPath,
+        stallTimeout: TimeInterval = defaultStallTimeout
     ) -> GitResult {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
@@ -189,6 +215,11 @@ enum GitRunner {
         var buf = Data()
         var timedOut = false
         var aborted = false
+        // Stall tracking: the last time this child produced ANY output. Reset on
+        // every successful read, so a repo that's actively transferring never
+        // trips the stall deadline — only true silence does.
+        var lastOutputAt = Date()
+        var stalled = false
 
         // Non-blocking fd + select() with a bounded slice. We end on EITHER pipe
         // EOF (read==0) OR the git child exiting (`exited` flag). EOF alone is
@@ -207,6 +238,7 @@ enum GitRunner {
                 }
                 if n > 0 {
                     buf.append(contentsOf: readBuffer[0..<n])
+                    lastOutputAt = Date()   // progress → reset the stall deadline
                     drainLines(&buf, into: &captured, onProgress: onProgress)
                 } else if n == 0 {
                     return true   // EOF — stream fully closed
@@ -236,6 +268,16 @@ enum GitRunner {
             let remaining = deadline.timeIntervalSinceNow
             if remaining <= 0 {
                 timedOut = true
+                if p.isRunning { p.terminate() }
+                break
+            }
+            // Stall deadline: the child is alive but has said nothing for
+            // `stallTimeout`. This is the VPN-down / dead-tunnel case, which
+            // used to burn the full `timeout`. A stall IS retryable (unlike a
+            // total-transfer timeout), so it reports as a plain failure and the
+            // retry layer above decides — see the `stalled` handling below.
+            if stallTimeout > 0, Date().timeIntervalSince(lastOutputAt) >= stallTimeout {
+                stalled = true
                 if p.isRunning { p.terminate() }
                 break
             }
@@ -291,6 +333,15 @@ enum GitRunner {
         if timedOut {
             output += "\n[timed out after \(Int(timeout))s]"
             return GitResult(ok: false, output: output, timedOut: true, aborted: false)
+        }
+        // A stall is reported as a NON-timedOut failure on purpose: timedOut
+        // short-circuits the retry loop (correctly — a genuine 30-min transfer
+        // won't get faster on retry), but a stalled connect very often succeeds
+        // on the next attempt once the tunnel finishes coming up. So this stays
+        // retryable.
+        if stalled {
+            output += "\n[no output for \(Int(stallTimeout))s — connection stalled]"
+            return GitResult(ok: false, output: output, timedOut: false, aborted: false)
         }
         if aborted {
             return GitResult(ok: false, output: output + "\n[aborted]", timedOut: false, aborted: true)

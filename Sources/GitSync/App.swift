@@ -65,6 +65,12 @@ struct GitSyncApp: App {
         if args.contains("--legacy-keychain-cleanup-test") {
             exit(LegacyKeychainCleanupTest.run())
         }
+        if args.contains("--reachability-gate-test") {
+            exit(ReachabilityGateTest.run())
+        }
+        if args.contains("--stall-timeout-test") {
+            exit(StallTimeoutTest.run())
+        }
 
         // Order matters: settings + inventory must exist before AppState so the
         // engine picks up the user's stored settings and the inventory store can

@@ -35,11 +35,20 @@ final class AppState: ObservableObject {
     // stays alive while ANY job is active and stops only when all are done —
     // the first individual to finish must not stop the timer for the others.
     private var drainRetain = 0
+    // Provider reachability, owned here and SHARED with the engine. One
+    // instance means the Providers-tab status dot, the full-run gate and the
+    // individual-sync gate all read the same fact — previously the UI could
+    // show a red dot for GitLab while 31 per-repo syncs sat stalled behind the
+    // same dead tunnel, because nothing connected those two pieces of state.
+    let providerHealth = ProviderHealth()
+    // Watches for the network path changing under us (VPN up/down, wake).
+    let pathMonitor = NetworkPathMonitor()
     // The native Swift sync engine. Feeds an EventBuffer via BufferSink, which
     // the 10Hz drain timer / two-lane / finalize logic below consumes.
     private(set) lazy var engine: SyncEngine = SyncEngine(
         settings: settingsStore.currentSyncSettings,
-        sink: BufferSink(buffer: eventBuffer)
+        sink: BufferSink(buffer: eventBuffer),
+        health: providerHealth
     )
     private(set) lazy var scheduler: Scheduler = Scheduler(state: self, settings: settingsStore, providers: providers)
 
@@ -252,10 +261,23 @@ final class AppState: ObservableObject {
         let token = providers.token(for: provider)
         let archived = provider.includeArchived
         let id = provider.id
+        let health = providerHealth
         Task.detached {
             let result = ConnectionTester.test(
                 kind: kind, host: host, scope: scope,
                 bitbucketUser: user, token: token, includeArchived: archived)
+            // Feed the verdict into the shared reachability state. A real
+            // authenticated request knows strictly more than a HEAD probe: an
+            // auth failure (401/403/404) still PROVES the host answered, so it
+            // must record as reachable — otherwise a wrong-token provider would
+            // also be treated as VPN-down and its syncs refused for the wrong
+            // reason. Only a transport failure means unreachable.
+            switch result {
+            case .unreachable(let detail):
+                health.note(providerID: id.uuidString, reachable: false, detail: detail)
+            default:
+                health.note(providerID: id.uuidString, reachable: true)
+            }
             await MainActor.run {
                 self.connectionStatus[id] = result
                 self.connectionTesting.remove(id)
