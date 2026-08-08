@@ -229,6 +229,7 @@ own diagnostic modes:
 .../Contents/MacOS/GitSync --whitelist-test             # tracked-only filter
 .../Contents/MacOS/GitSync --provider-migration-test    # legacy→provider migration
 .../Contents/MacOS/GitSync --provider-validation-test   # provider folder-collision guard
+.../Contents/MacOS/GitSync --provider-filter-test       # repo-list chips keyed by provider, not kind
 .../Contents/MacOS/GitSync --abort-reset-test           # cancel doesn't poison later syncs
 .../Contents/MacOS/GitSync --scheduler-test             # due/catch-up logic
 .../Contents/MacOS/GitSync --connection-test            # credential test + error classification

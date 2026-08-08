@@ -59,6 +59,9 @@ struct GitSyncApp: App {
         if args.contains("--provider-migration-test") {
             exit(ProviderMigrationTest.run())
         }
+        if args.contains("--provider-filter-test") {
+            exit(ProviderFilterTest.run())
+        }
         if args.contains("--connection-test") {
             exit(ConnectionTest.run())
         }

@@ -9,6 +9,59 @@ import SwiftUI
 // existing single-provider-per-kind config into Provider instances so nothing
 // changes for them.
 
+// Which filter chip a repo row belongs to in the Repositories list.
+//
+// Identity is the PROVIDER, not the platform kind. The list used to filter by
+// kind (a fixed gitlab/github/bitbucket enum), which meant two providers of the
+// same kind collapsed into one chip and their rows were indistinguishable —
+// same badge text, and `rel` is provider-local so even the paths match. Nobody
+// wants to filter by "which API dialect"; they want to isolate one source.
+enum ProviderFilterKey: Hashable {
+    case provider(String)   // Provider.id.uuidString
+    // Every row whose providerID matches no configured provider: rows orphaned
+    // by a deleted provider, and rows predating the provider model. They get
+    // their own bucket so deleting a provider can't silently hide repos the
+    // inventory still lists.
+    case unknown
+}
+
+// One chip in the Repositories filter bar. The view adds color and tooltips;
+// everything that decides WHAT is shown lives here so it can be tested.
+struct ProviderFilterChip: Identifiable, Hashable {
+    let key: ProviderFilterKey
+    let label: String
+    let count: Int
+    var id: ProviderFilterKey { key }
+    var isOrphanBucket: Bool { key == .unknown }
+}
+
+enum ProviderFilter {
+    // Classify one row against the configured provider IDs.
+    static func key(forProviderID id: String, configured: Set<String>) -> ProviderFilterKey {
+        configured.contains(id) ? .provider(id) : .unknown
+    }
+
+    // One chip per configured provider, in configured order, labelled with the
+    // provider's NAME — so two providers of the same kind are separately
+    // filterable. A configured provider with zero rows still gets a chip (it
+    // exists; saying so is more useful than hiding it). The orphan bucket is
+    // appended only when such rows actually exist.
+    static func chips(providers: [Provider],
+                      counts: [ProviderFilterKey: Int]) -> [ProviderFilterChip] {
+        var out = providers.map { p in
+            ProviderFilterChip(key: .provider(p.id.uuidString),
+                               label: p.name,
+                               count: counts[.provider(p.id.uuidString)] ?? 0)
+        }
+        if let orphaned = counts[.unknown], orphaned > 0 {
+            out.append(ProviderFilterChip(key: .unknown,
+                                          label: "unknown provider",
+                                          count: orphaned))
+        }
+        return out
+    }
+}
+
 @MainActor
 final class ProviderStore: ObservableObject {
     @Published private(set) var providers: [Provider] = []
@@ -28,6 +81,15 @@ final class ProviderStore: ObservableObject {
     // ---- CRUD --------------------------------------------------------
 
     func provider(id: UUID) -> Provider? { providers.first { $0.id == id } }
+
+    // The user-given name for a repo row's providerID, or nil when no
+    // configured provider owns it — the row's provider was deleted, or the row
+    // predates the provider model. Callers treat nil as "orphaned row" rather
+    // than inventing a label, so those rows stay visibly distinct.
+    func name(forProviderID id: String) -> String? {
+        guard let uuid = UUID(uuidString: id) else { return nil }
+        return providers.first { $0.id == uuid }?.name
+    }
 
     @discardableResult
     func upsert(_ provider: Provider) -> ProviderValidation {

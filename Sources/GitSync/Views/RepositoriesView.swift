@@ -16,7 +16,11 @@ struct RepositoriesView: View {
 
     @State private var searchText: String = ""
     @State private var enabledStatuses: Set<SyncStatus> = Set(SyncStatus.allCases)
-    @State private var enabledPlatforms: Set<String> = Set(Platform.allCases.map(\.rawValue))
+    // Stored as the HIDDEN set, not the shown set: a provider added while this
+    // window is open must default to visible. Seeding a "shown" set once (as
+    // the old platform filter did) would leave any later-added provider
+    // silently filtered out of the list.
+    @State private var hiddenProviders: Set<ProviderFilterKey> = []
     @State private var collapsedSections: Set<SyncStatus> = []
     @State private var selection: Set<RepoID> = []
     @State private var pendingTrash: Set<RepoID> = []
@@ -116,11 +120,16 @@ struct RepositoriesView: View {
                     }
                 }
                 Spacer()
-                ForEach(Platform.allCases, id: \.rawValue) { platform in
-                    PlatformChip(platform: platform.rawValue,
-                                 isOn: enabledPlatforms.contains(platform.rawValue)) {
-                        togglePlatform(platform.rawValue)
+                ForEach(providerChips) { chip in
+                    FilterChip(
+                        label: chip.label,
+                        count: chip.count,
+                        isOn: !hiddenProviders.contains(chip.key),
+                        color: chipColor(chip)
+                    ) {
+                        toggle(provider: chip.key)
                     }
+                    .help(chipHelp(chip))
                 }
             }
         }
@@ -286,14 +295,27 @@ struct RepositoriesView: View {
         ]
     }
 
+    // Hoisted into a local set by each caller below so a 3,000-row filter pass
+    // doesn't re-scan the provider list once per repo.
+    private var configuredProviderIDs: Set<String> {
+        Set(providers.providers.map(\.id.uuidString))
+    }
+
     private var filteredRepos: [Repo] {
         let needle = searchText.lowercased()
+        let known = configuredProviderIDs
+        // Search matches the provider's NAME too, so "work" finds the repos of
+        // a provider called "Work GitHub" — the kind alone can't distinguish it.
+        let nameByID = Dictionary(uniqueKeysWithValues:
+            providers.providers.map { ($0.id.uuidString, $0.name.lowercased()) })
         return inventory.repos.values.filter { repo in
-            guard enabledPlatforms.contains(repo.id.platform) else { return false }
+            let key = ProviderFilter.key(forProviderID: repo.id.providerID, configured: known)
+            guard !hiddenProviders.contains(key) else { return false }
             guard enabledStatuses.contains(repo.effectiveStatus) else { return false }
             if needle.isEmpty { return true }
             return repo.id.rel.lowercased().contains(needle)
                 || repo.id.platform.lowercased().contains(needle)
+                || (nameByID[repo.id.providerID]?.contains(needle) ?? false)
         }
     }
 
@@ -309,11 +331,43 @@ struct RepositoriesView: View {
     }
 
     private var countByStatus: [SyncStatus: Int] {
+        let known = configuredProviderIDs
         var c: [SyncStatus: Int] = [:]
-        for repo in inventory.repos.values where enabledPlatforms.contains(repo.id.platform) {
+        for repo in inventory.repos.values {
+            let key = ProviderFilter.key(forProviderID: repo.id.providerID, configured: known)
+            guard !hiddenProviders.contains(key) else { continue }
             c[repo.effectiveStatus, default: 0] += 1
         }
         return c
+    }
+
+    // Counts mirror the status chips' convention: each chip counts what the
+    // OTHER filter currently admits, so the numbers describe what toggling it
+    // would reveal.
+    private var providerChips: [ProviderFilterChip] {
+        let known = configuredProviderIDs
+        var counts: [ProviderFilterKey: Int] = [:]
+        for repo in inventory.repos.values
+        where enabledStatuses.contains(repo.effectiveStatus) {
+            counts[ProviderFilter.key(forProviderID: repo.id.providerID, configured: known),
+                   default: 0] += 1
+        }
+        return ProviderFilter.chips(providers: providers.providers, counts: counts)
+    }
+
+    private func chipColor(_ chip: ProviderFilterChip) -> Color {
+        chip.isOrphanBucket ? .orange : .accentColor
+    }
+
+    private func chipHelp(_ chip: ProviderFilterChip) -> String {
+        if chip.isOrphanBucket {
+            return "Repos left over from a provider that is no longer configured. "
+                 + "They are never synced or updated."
+        }
+        guard case .provider(let pid) = chip.key,
+              let p = providers.provider(id: UUID(uuidString: pid) ?? UUID())
+        else { return chip.label }
+        return "\(p.kind.titleName) — \(p.localPath)"
     }
 
     private func toggle(status: SyncStatus) {
@@ -324,11 +378,11 @@ struct RepositoriesView: View {
         }
     }
 
-    private func togglePlatform(_ p: String) {
-        if enabledPlatforms.contains(p) {
-            enabledPlatforms.remove(p)
+    private func toggle(provider key: ProviderFilterKey) {
+        if hiddenProviders.contains(key) {
+            hiddenProviders.remove(key)
         } else {
-            enabledPlatforms.insert(p)
+            hiddenProviders.insert(key)
         }
     }
 }
@@ -350,13 +404,14 @@ private struct RepoRow: View {
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(repo.id.platform)
+                    Text(providerLabel)
                         .font(.caption2)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.15))
+                        .background((isOrphaned ? Color.orange : Color.secondary).opacity(0.15))
                         .clipShape(RoundedRectangle(cornerRadius: 3))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isOrphaned ? Color.orange : Color.secondary)
+                        .help(providerHelp)
                 }
                 if !repo.lastDetail.isEmpty {
                     Text(repo.lastDetail)
@@ -460,6 +515,19 @@ private struct RepoRow: View {
         return attributed
     }
 
+    // The badge names the PROVIDER, not its platform kind: with two providers
+    // of the same kind, the kind is identical on both and the rel is
+    // provider-local, so kind-labelled rows are indistinguishable. An orphaned
+    // row has no name to show, so it falls back to the kind and is tinted.
+    private var providerName: String? { providers.name(forProviderID: repo.id.providerID) }
+    private var isOrphaned: Bool { providerName == nil }
+    private var providerLabel: String { providerName ?? repo.id.platform }
+    private var providerHelp: String {
+        isOrphaned
+            ? "This repo's provider is no longer configured, so it is never synced or updated."
+            : "Provider: \(providerLabel)"
+    }
+
     private var syncButtonHelp: String {
         if state.isRunning { return "A full sync is running" }
         if state.isSyncing(repo.id) { return "Syncing…" }
@@ -544,24 +612,6 @@ private struct FilterChip: View {
     }
 }
 
-private struct PlatformChip: View {
-    let platform: String
-    let isOn: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(platform)
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(isOn ? Color.accentColor.opacity(0.20) : Color.secondary.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-        }
-        .buttonStyle(.plain)
-    }
-}
 
 // MARK: - Live run activity
 
