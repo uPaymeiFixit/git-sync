@@ -220,25 +220,32 @@ enum RepoSyncer {
         GitRunner.git(path, "rev-parse", "--verify", "refs/remotes/origin/\(branch)", env: ctx.makeEnv()).code == 0
     }
     private static func remoteHasNoRefs(_ path: String, _ ctx: GitContext) -> Bool {
-        // ls-remote is the only NETWORK query routed through the non-streaming
-        // runner (GitRunner.git, which reads to EOF). Force ControlMaster=no so
-        // it can't spawn or attach a persistent ssh master that would hold the
-        // pipe write-end open for ControlPersist seconds after ls-remote itself
-        // exits — that would block the read-to-EOF forever.
+        // The only NETWORK query outside clone/fetch, so it uses the STREAMING
+        // runner rather than the read-to-EOF one-shot (GitRunner.git). That
+        // one-shot has no deadline and no abort check of its own: it was safe
+        // here only because GIT_SSH_COMMAND happens to carry ConnectTimeout,
+        // which is a ceiling set in another file that nothing here enforces.
+        // Streaming brings its own timeout, stall deadline, and abort check, so
+        // this can no longer outlive a cancelled run.
         //
-        // The streaming clone/fetch path (GitRunner.runStreamingOnce) does NOT
-        // need this and MUST keep the master alive (it's the 40min→2min win):
-        // it tolerates the leaked write-end because it ends its read loop on
-        // the git child's exit (the `exited` flag), not on pipe EOF. If you
-        // ever change that loop back to EOF-only, this one-shot is no longer
-        // the only place that needs ControlMaster=no — the whole engine
-        // regresses. Keep the two coupled.
-        var env = ctx.makeEnv()
-        if let ssh = env["GIT_SSH_COMMAND"] {
-            env["GIT_SSH_COMMAND"] = ssh + " -o ControlMaster=no"
-        }
-        let r = GitRunner.git(path, "ls-remote", "--quiet", "origin", env: env)
-        return r.code == 0 && r.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // attempts: 1 — this is a yes/no probe on a fetch that ALREADY failed.
+        // Retrying would just re-pay the timeout to learn the same thing.
+        //
+        // Using the streaming runner is also why no ControlMaster=no override is
+        // needed. The one-shot reads to EOF, and an ssh master holds the pipe's
+        // write-end open for ControlPersist seconds after the git child exits,
+        // which blocked that read forever. The streaming reader ends on the
+        // CHILD'S EXIT instead (runStreamingOnce's `exited` flag, guarded by
+        // --stream-eof-test), so the master can stay alive — which is also the
+        // 40min→2min multiplexing win the fetch path depends on.
+        let r = GitRunner.runStreamingWithRetry(
+            ["-C", path, "ls-remote", "--quiet", "origin"],
+            env: ctx.makeEnv(),
+            attempts: 1,
+            timeout: ctx.timeout,
+            isAborted: ctx.isAborted
+        )
+        return r.ok && r.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private static func isDirty(_ path: String, _ ctx: GitContext) -> Bool {
         let env = ctx.makeEnv()

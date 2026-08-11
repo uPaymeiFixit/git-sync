@@ -75,6 +75,67 @@ enum StreamEofTest {
               elapsed4 < 5.0, String(format: "took %.1fs", elapsed4))
         check("genuine hang reports timedOut", r4.timedOut, "timedOut=\(r4.timedOut)")
 
+        // CASE 5: real git through the streaming runner, for the empty-remote
+        // probe (RepoSyncer.remoteHasNoRefs). That query used to run on the
+        // read-to-EOF one-shot runner; it now runs here, and its whole meaning
+        // rests on "exit 0 with EMPTY captured output" vs "exit 0 with output".
+        // So exercise both against real bare repos rather than trusting that the
+        // reader preserves tab-separated ls-remote lines.
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("gitsync-lsremote-\(getpid())")
+        defer { try? fm.removeItem(at: tmp) }
+        func git(_ args: [String]) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run(); p.waitUntilExit()
+        }
+        // An EMPTY bare remote, cloned. ls-remote must report zero refs.
+        let emptyBare = tmp.appendingPathComponent("empty.git")
+        let emptyClone = tmp.appendingPathComponent("empty-clone")
+        try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        git(["init", "--bare", "-q", "--initial-branch=master", emptyBare.path])
+        git(["clone", "-q", emptyBare.path, emptyClone.path])
+        // A POPULATED bare remote, cloned. ls-remote must report refs.
+        let fullBare = tmp.appendingPathComponent("full.git")
+        let fullClone = tmp.appendingPathComponent("full-clone")
+        let seed = tmp.appendingPathComponent("seed")
+        git(["init", "--bare", "-q", "--initial-branch=master", fullBare.path])
+        git(["init", "-q", "--initial-branch=master", seed.path])
+        try? "hello".write(to: seed.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        git(["-C", seed.path, "add", "."])
+        git(["-C", seed.path, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"])
+        git(["-C", seed.path, "remote", "add", "origin", fullBare.path])
+        git(["-C", seed.path, "push", "-q", "origin", "master"])
+        git(["clone", "-q", fullBare.path, fullClone.path])
+
+        func lsRemote(_ repo: String) -> GitResult {
+            GitRunner.runStreamingWithRetry(
+                ["-C", repo, "ls-remote", "--quiet", "origin"],
+                env: env, attempts: 1, timeout: 60)
+        }
+        if fm.fileExists(atPath: emptyClone.path) && fm.fileExists(atPath: fullClone.path) {
+            let rEmpty = lsRemote(emptyClone.path)
+            let empties = rEmpty.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            check("ls-remote on an EMPTY remote succeeds", rEmpty.ok,
+                  "ok=\(rEmpty.ok) out=\(rEmpty.output)")
+            check("ls-remote on an EMPTY remote captures no refs", empties,
+                  "got: \(rEmpty.output)")
+
+            let rFull = lsRemote(fullClone.path)
+            let fulls = rFull.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            check("ls-remote on a POPULATED remote succeeds", rFull.ok,
+                  "ok=\(rFull.ok) out=\(rFull.output)")
+            check("ls-remote on a POPULATED remote captures refs (not mistaken for empty)",
+                  !fulls, "output was empty — empty-remote detection would misfire")
+            check("captured ls-remote output keeps its ref names",
+                  rFull.output.contains("master"), "got: \(rFull.output)")
+        } else {
+            check("bare-repo fixtures were created", false, "clone failed; skipped ls-remote checks")
+        }
+
         print()
         if failures == 0 { print("Stream EOF-vs-exit test passed."); return 0 }
         print("\(failures) check(s) failed."); return 1

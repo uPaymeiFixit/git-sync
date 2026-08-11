@@ -7,9 +7,13 @@ struct ProvidersTab: View {
     @EnvironmentObject private var providers: ProviderStore
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var state: AppState
-    @State private var editing: Provider?
-    @State private var isNew = false
     @State private var selection: UUID?
+    // ONE sheet state for both the editor and the removal confirmation. Two
+    // separate `.sheet(item:)` modifiers on the same view is a SwiftUI
+    // coin-flip — the second is liable to be ignored — so the cases share a
+    // single presentation.
+    @State private var sheet: ProviderSheet?
+    @State private var removalSummary: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,29 +28,40 @@ struct ProvidersTab: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Single-click selection is handled natively by List(selection:).
-                // The earlier `.onTapGesture(count: 2)` REPLACED the List's own
-                // click recognizer, which made both selection and double-click
-                // fire unreliably ("sometimes it selects, sometimes it doesn't").
-                // `.simultaneousGesture` runs ALONGSIDE the List's recognizer
-                // instead of competing with it, so single-click selection stays
-                // native and double-click reliably opens that row. The row also
-                // fills the full width so the whole row is a hit target.
+                // Selection is set EXPLICITLY here rather than left to
+                // List(selection:), because a tap gesture on the row content and
+                // the List's own click handling cannot be made to share a click.
+                //
+                // History: `.onTapGesture(count: 2)` alone swallowed single
+                // clicks, so it was changed to `.simultaneousGesture` on the
+                // theory that this would let the List's recognizer run
+                // alongside. It doesn't. `simultaneousGesture` only governs how
+                // a gesture composes with OTHER SWIFTUI GESTURES; it says
+                // nothing about the AppKit table view underneath, which is what
+                // actually implements row selection. The row's gesture still
+                // claims the mouse-down — and `.contentShape(Rectangle())` plus
+                // the full-width frame make that the whole row — so the table
+                // view usually never saw a plain click. Hence "I can double-click
+                // to open, arrow keys work, but single-click rarely highlights":
+                // keyboard selection goes through the List, mouse selection was
+                // being intercepted.
+                //
+                // So don't compete for the click — own it. Both handlers set
+                // `selection` themselves, which makes highlighting deterministic
+                // and independent of gesture arbitration. The 2-count must be
+                // registered BEFORE the 1-count: SwiftUI matches higher tap
+                // counts first, and a 2-count added after a 1-count never fires.
                 List(selection: $selection) {
                     ForEach(providers.providers) { p in
                         ProviderRow(provider: p)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
                             .tag(p.id)
-                            .simultaneousGesture(TapGesture(count: 2).onEnded {
-                                startEdit(p)
-                            })
+                            .onTapGesture(count: 2) { selection = p.id; startEdit(p) }
+                            .onTapGesture { selection = p.id }
                             .contextMenu {
                                 Button("Edit…") { startEdit(p) }
-                                Button("Remove", role: .destructive) {
-                                    providers.remove(id: p.id)
-                                    if selection == p.id { selection = nil }
-                                }
+                                Button("Remove…", role: .destructive) { sheet = .remove(p) }
                             }
                     }
                 }
@@ -70,11 +85,37 @@ struct ProvidersTab: View {
             .buttonStyle(.borderless)
             .padding(8)
         }
-        .sheet(item: $editing) { p in
-            ProviderEditor(initial: p, isNew: isNew)
-                .environmentObject(providers)
-                .environmentObject(settings)
-                .environmentObject(state)
+        .sheet(item: $sheet) { active in
+            switch active {
+            case .edit(let p, let isNew):
+                ProviderEditor(initial: p, isNew: isNew)
+                    .environmentObject(providers)
+                    .environmentObject(settings)
+                    .environmentObject(state)
+            case .remove(let p):
+                ProviderRemovalSheet(provider: p, impact: state.removalImpact(for: p)) { trashClones in
+                    sheet = nil
+                    Task {
+                        let report = await state.removeProvider(p, trashClones: trashClones)
+                        if selection == p.id { selection = nil }
+                        if let report, !report.trashed.isEmpty || !report.skipped.isEmpty {
+                            removalSummary = report.summary
+                        }
+                    }
+                } onCancel: {
+                    sheet = nil
+                }
+            }
+        }
+        .alert(
+            "Provider removed",
+            isPresented: Binding(
+                get: { removalSummary != nil },
+                set: { if !$0 { removalSummary = nil } })
+        ) {
+            Button("OK") { removalSummary = nil }
+        } message: {
+            Text(removalSummary ?? "")
         }
         // Verify each configured provider's credentials when the tab opens, so
         // the status dots are meaningful without the user opening each editor.
@@ -85,19 +126,105 @@ struct ProvidersTab: View {
         // No default folder — the user must pick one before saving (validation
         // rejects an empty localPath). A guessed default was more likely wrong
         // than right and added a whole "Locations" settings tab for one field.
-        isNew = true
-        editing = Provider(kind: .gitlab, name: "New Provider", localPath: "")
+        sheet = .edit(Provider(kind: .gitlab, name: "New Provider", localPath: ""), isNew: true)
     }
-    private func startEdit(_ p: Provider) { isNew = false; editing = p }
+    private func startEdit(_ p: Provider) { sheet = .edit(p, isNew: false) }
 
     private func editSelected() {
         guard let id = selection, let p = providers.provider(id: id) else { return }
         startEdit(p)
     }
     private func removeSelected() {
-        guard let id = selection else { return }
-        providers.remove(id: id)
-        selection = nil
+        guard let id = selection, let p = providers.provider(id: id) else { return }
+        sheet = .remove(p)
+    }
+}
+
+// The single sheet presentation for this tab. `id` distinguishes edit from
+// remove for the SAME provider, so switching between them re-presents rather
+// than reusing a stale sheet.
+private enum ProviderSheet: Identifiable {
+    case edit(Provider, isNew: Bool)
+    case remove(Provider)
+
+    var id: String {
+        switch self {
+        case .edit(let p, let isNew): return "edit-\(isNew)-\(p.id.uuidString)"
+        case .remove(let p):          return "remove-\(p.id.uuidString)"
+        }
+    }
+}
+
+// Confirmation for removing a provider.
+//
+// Removal used to be immediate from both the − button and the context menu: one
+// click deleted the provider and its Keychain token, and stranded every
+// inventory row it owned, with no prompt and no undo. That is how ~1,500 dead
+// rows accumulated on a machine where a provider was re-created.
+//
+// The two consequences are deliberately separated. The metadata (rows, sync
+// history, token) always goes — keeping it helps nobody, since a re-added
+// provider gets a NEW UUID and can never re-link to the old rows. The cloned
+// folders are real files, so they are an explicit choice, stated as two radio
+// options rather than an unmarked default, and defaulting to leaving them.
+private struct ProviderRemovalSheet: View {
+    let provider: Provider
+    let impact: ProviderRemovalImpact
+    let onRemove: (Bool) -> Void
+    let onCancel: () -> Void
+
+    @State private var trashClones = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Remove “\(provider.name)”?")
+                .font(.headline)
+
+            Text(metadataConsequence)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if impact.clonedCount > 0 {
+                Divider()
+                Text("\(impact.clonedCount.formatted()) repo(s) are cloned at \(impact.localPath):")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("", selection: $trashClones) {
+                    Text("Leave them on disk").tag(false)
+                    Text("Move them to the Trash").tag(true)
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                if trashClones {
+                    Text("Repos with uncommitted changes or unpushed commits are skipped "
+                         + "automatically. Everything else goes to the Trash, where it can "
+                         + "be restored.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Remove Provider", role: .destructive) { onRemove(trashClones) }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 4)
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private var metadataConsequence: String {
+        guard impact.repoCount > 0 else {
+            return "GitSync will forget this provider and delete its saved access token."
+        }
+        return "GitSync will stop tracking its \(impact.repoCount.formatted()) repo(s) "
+             + "and forget their sync history. Its saved access token will be deleted."
     }
 }
 

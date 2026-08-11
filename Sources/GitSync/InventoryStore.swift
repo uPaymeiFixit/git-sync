@@ -148,6 +148,21 @@ final class InventoryStore: ObservableObject {
 
     // ---- Local-delete bookkeeping -------------------------------------
 
+    // Drop every row belonging to one provider. Called when that provider is
+    // removed: nothing rediscovers these rows afterwards (discovery runs per
+    // configured provider) and no sync can touch them (runIndividual refuses a
+    // row whose providerID matches no provider), so leaving them behind
+    // stranded them permanently — they accumulated as duplicates of the rows a
+    // re-added provider then created under its new UUID.
+    @discardableResult
+    func removeAll(providerID: String) -> Int {
+        let doomed = repos.keys.filter { $0.providerID == providerID }
+        guard !doomed.isEmpty else { return 0 }
+        for id in doomed { repos[id] = nil }
+        scheduleSave()
+        return doomed.count
+    }
+
     // The repo's local clone was trashed and the remote doesn't know it
     // either — drop the row entirely.
     func remove(_ id: RepoID) {

@@ -137,6 +137,40 @@ enum StallTimeoutTest {
         check("a continuously-chattering child is classified as timedOut",
               rTimeout.timedOut, "timedOut=\(rTimeout.timedOut)")
 
+        // CASE 5b: the exact configuration RepoSyncer.remoteHasNoRefs uses for
+        // ls-remote — attempts: 1, default stall deadline. That query used to go
+        // through the read-to-EOF one-shot runner, which has no deadline and no
+        // abort check; its only ceiling was a ConnectTimeout set in the ssh
+        // command built in another file. Here it must die on its own, once, and
+        // stay interruptible.
+        let onceRetries = Counter()
+        let start5b = Date()
+        let rOnce = GitRunner.runStreamingWithRetry(
+            ["-c", "sleep 600"],
+            env: env, attempts: 1, timeout: 600, backoff: 0.01,
+            onRetry: { onceRetries.bump() },
+            stallTimeout: 1.0, exe: "/bin/sh")
+        let e5b = Date().timeIntervalSince(start5b)
+        check("a single-attempt probe dies at the stall deadline", e5b < 10,
+              String(format: "took %.1fs", e5b))
+        check("a single-attempt probe is not retried", onceRetries.value == 0,
+              "retries=\(onceRetries.value)")
+        check("a stalled single-attempt probe reports failure", !rOnce.ok)
+
+        // ...and it honours Cancel, which the one-shot runner could not. An
+        // already-aborted call must return immediately without spawning.
+        let start5c = Date()
+        let rAborted = GitRunner.runStreamingWithRetry(
+            ["-c", "sleep 600"],
+            env: env, attempts: 1, timeout: 600, backoff: 0.01,
+            isAborted: { true },
+            stallTimeout: 30, exe: "/bin/sh")
+        let e5c = Date().timeIntervalSince(start5c)
+        check("an aborted probe returns immediately", e5c < 2,
+              String(format: "took %.1fs", e5c))
+        check("an aborted probe is marked aborted", rAborted.aborted)
+        check("an aborted probe is not ok", !rAborted.ok)
+
         // CASE 6: stallTimeout=0 disables the check (escape hatch for a caller
         // that genuinely expects long silence).
         let start6 = Date()

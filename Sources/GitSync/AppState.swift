@@ -176,27 +176,24 @@ final class AppState: ObservableObject {
     // match a configured provider (pre-migration / legacy rows), where rel may
     // still carry the platform-dir prefix.
     func diskPath(for id: RepoID) -> URL? {
-        if let p = providers.provider(id: UUID(uuidString: id.providerID) ?? UUID()) {
-            return URL(fileURLWithPath: p.resolvedLocalPath, isDirectory: true)
-                .appendingPathComponent(id.rel)
-        }
-        // Legacy fallback: syncRoot + rel (rel here still includes the dir).
-        let root = URL(fileURLWithPath: (settingsStore.syncRoot as NSString).expandingTildeInPath)
-        return root.appendingPathComponent(id.rel)
+        RepoPathResolver.path(for: id, providerRoots: providerRoots, legacyRoot: legacyRoot)
+    }
+
+    private var providerRoots: [String: String] {
+        Dictionary(uniqueKeysWithValues:
+            providers.providers.map { ($0.id.uuidString, $0.resolvedLocalPath) })
+    }
+
+    private var legacyRoot: String {
+        (settingsStore.syncRoot as NSString).expandingTildeInPath
     }
 
     // A Sendable snapshot resolver (provider folders captured now) for handing
     // to RepoTrasher off the main actor.
     private func diskPathResolver() -> @Sendable (RepoID) -> URL? {
-        let byID = Dictionary(uniqueKeysWithValues:
-            providers.providers.map { ($0.id.uuidString, $0.resolvedLocalPath) })
-        let legacyRoot = (settingsStore.syncRoot as NSString).expandingTildeInPath
-        return { id in
-            if let root = byID[id.providerID] {
-                return URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent(id.rel)
-            }
-            return URL(fileURLWithPath: legacyRoot, isDirectory: true).appendingPathComponent(id.rel)
-        }
+        let roots = providerRoots
+        let legacy = legacyRoot
+        return { RepoPathResolver.path(for: $0, providerRoots: roots, legacyRoot: legacy) }
     }
 
     // The folders a trash target must live under (provider folders + the legacy
@@ -239,6 +236,49 @@ final class AppState: ObservableObject {
             inventory.autoTrackClonedRepos(providerID: provider.id.uuidString)
         }
         return v
+    }
+
+    // ---- Provider removal ---------------------------------------------
+
+    // What removing this provider would affect, for the confirmation sheet.
+    func removalImpact(for provider: Provider) -> ProviderRemovalImpact {
+        let pid = provider.id.uuidString
+        let rows = inventory.repos.values.filter { $0.id.providerID == pid }
+        return ProviderRemovalImpact(
+            repoCount: rows.count,
+            clonedCount: rows.filter(\.isClonedLocally).count,
+            localPath: provider.localPath)
+    }
+
+    // Remove a provider, its inventory rows, and its stored token. Optionally
+    // moves its cloned folders to the Trash first.
+    //
+    // ORDER IS LOAD-BEARING. The clones must be trashed while the provider is
+    // still configured: disk paths resolve through its localPath, and once it's
+    // gone RepoPathResolver falls back to the legacy sync root — a different
+    // folder. RepoTrasher's allowedRoots permits that root, so it would not
+    // catch the mistake. See RepoPathResolverTest.
+    //
+    // The rows always go, whether or not the clones do. Nothing rediscovers a
+    // removed provider's rows and no sync can act on them, so keeping them only
+    // strands them — which is what produced ~1,500 permanently-dead duplicate
+    // rows when a provider was re-created under a new UUID.
+    @discardableResult
+    func removeProvider(_ provider: Provider, trashClones: Bool) async -> TrashReport? {
+        let pid = provider.id.uuidString
+        var report: TrashReport?
+        if trashClones {
+            let ids = inventory.repos.values
+                .filter { $0.id.providerID == pid && $0.isClonedLocally }
+                .map(\.id)
+            if !ids.isEmpty {
+                report = await deleteLocalRepos(Set(ids))   // provider still configured
+            }
+        }
+        inventory.removeAll(providerID: pid)
+        providers.remove(id: provider.id)                   // also deletes its token
+        inventory.saveNow()                                 // don't rely on the debounce
+        return report
     }
 
     // Run a connection test for a configured provider (uses its stored token)

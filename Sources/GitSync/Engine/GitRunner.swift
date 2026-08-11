@@ -24,9 +24,18 @@ typealias ProgressHandler = @Sendable (_ phase: String, _ percent: Int) -> Void
 enum GitRunner {
     static let gitPath = "/usr/bin/git"
 
-    // One git invocation, combined output, no streaming/retry. Mirrors
-    // Blocking git call — returns (exitCode, output). Used for the cheap query
-    // commands (rev-parse, status, show-ref, ls-remote, …).
+    // One git invocation, combined output, no streaming/retry. Returns
+    // (exitCode, output). For the cheap LOCAL query commands — rev-parse,
+    // status, show-ref, rev-list, symbolic-ref, update-index.
+    //
+    // LOCAL ONLY. This path reads to EOF and calls waitUntilExit() with no
+    // deadline and no abort check, so a child that never finishes wedges the
+    // worker until the process dies, and Cancel cannot interrupt it. That is
+    // acceptable for commands that only touch the local object store; it is NOT
+    // acceptable for anything that opens a connection. Route network commands
+    // through runStreamingWithRetry, which has a timeout, a stall deadline, and
+    // isAborted (see RepoSyncer.remoteHasNoRefs, the one network query outside
+    // clone/fetch).
     @discardableResult
     static func git(_ repo: String, _ args: String..., env: [String: String]) -> (code: Int32, out: String) {
         runOnce(["-C", repo] + args, env: env)
