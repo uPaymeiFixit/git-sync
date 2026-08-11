@@ -28,55 +28,65 @@ struct ProvidersTab: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Selection is set EXPLICITLY here rather than left to
-                // List(selection:), because a tap gesture on the row content and
-                // the List's own click handling cannot be made to share a click.
+                // Rows carry NO gesture and NO per-row context menu. Selection,
+                // double-click, and the menu all come from
+                // .contextMenu(forSelectionType:menu:primaryAction:) below —
+                // the API built for this, where primaryAction IS double-click.
+                // The Repositories list already used this modifier, which is
+                // precisely why its rows never needed a gesture and its
+                // selection has always felt instant.
                 //
-                // History: `.onTapGesture(count: 2)` alone swallowed single
-                // clicks, so it was changed to `.simultaneousGesture` on the
-                // theory that this would let the List's recognizer run
-                // alongside. It doesn't. `simultaneousGesture` only governs how
-                // a gesture composes with OTHER SWIFTUI GESTURES; it says
-                // nothing about the AppKit table view underneath, which is what
-                // actually implements row selection. The row's gesture still
-                // claims the mouse-down — and `.contentShape(Rectangle())` plus
-                // the full-width frame make that the whole row — so the table
-                // view usually never saw a plain click. Hence "I can double-click
-                // to open, arrow keys work, but single-click rarely highlights":
-                // keyboard selection goes through the List, mouse selection was
-                // being intercepted.
-                //
-                // So don't compete for the click — own it. Both handlers set
-                // `selection` themselves, which makes highlighting deterministic
-                // and independent of gesture arbitration. The 2-count must be
-                // registered BEFORE the 1-count: SwiftUI matches higher tap
-                // counts first, and a 2-count added after a 1-count never fires.
+                // Three earlier attempts here failed, all for one reason: a
+                // SwiftUI tap gesture on a row and the AppKit table view's own
+                // click handling cannot share a click.
+                //   1. .onTapGesture(count: 2) alone — the gesture claimed the
+                //      mouse-down, so single-click mostly didn't select.
+                //   2. .simultaneousGesture — no better; that modifier governs
+                //      composition with other SwiftUI gestures only, not with
+                //      the AppKit view underneath.
+                //   3. An explicit 1-count gesture next to the 2-count —
+                //      reliable, but registering both counts makes SwiftUI wait
+                //      out the system double-click interval before it can call a
+                //      click single. Correct highlight, ~500ms late.
+                // A fourth attempt via NSClickGestureRecognizer failed too:
+                // NSTableView consumes mouse events in its own tracking loop
+                // inside mouseDown:, so a recognizer on a descendant view never
+                // sees the second click.
                 List(selection: $selection) {
                     ForEach(providers.providers) { p in
                         ProviderRow(provider: p)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
                             .tag(p.id)
-                            .onTapGesture(count: 2) { selection = p.id; startEdit(p) }
-                            .onTapGesture { selection = p.id }
-                            .contextMenu {
-                                Button("Edit…") { startEdit(p) }
-                                Button("Remove…", role: .destructive) { sheet = .remove(p) }
-                            }
                     }
                 }
                 .listStyle(.inset(alternatesRowBackgrounds: true))
+                .contextMenu(forSelectionType: UUID.self) { ids in
+                    if let p = provider(in: ids) {
+                        Button("Edit…") { startEdit(p) }
+                        Button("Remove…", role: .destructive) { sheet = .remove(p) }
+                    }
+                } primaryAction: { ids in
+                    // Double-click. Resolved from the clicked row's id rather
+                    // than `selection`, so it can't act on a stale highlight.
+                    if let p = provider(in: ids) { startEdit(p) }
+                }
             }
 
             Divider()
             HStack(spacing: 2) {
                 Button { startAdd() } label: { Image(systemName: "plus") }
                     .help("Add a provider")
+                // Enabled state keys off the RESOLVED provider, not just a
+                // non-nil selection. Keying off `selection == nil` let the
+                // button look enabled while holding an id no provider matches
+                // (e.g. left over from a previous removal) — the action's own
+                // guard then returned silently, so the click did nothing with no
+                // explanation. Now enabled implies actionable.
                 Button { removeSelected() } label: { Image(systemName: "minus") }
-                    .disabled(selection == nil)
+                    .disabled(selectedProvider == nil)
                     .help("Remove the selected provider")
                 Button { editSelected() } label: { Image(systemName: "pencil") }
-                    .disabled(selection == nil)
+                    .disabled(selectedProvider == nil)
                     .help("Edit the selected provider")
                 Spacer()
                 Text("\(providers.providers.count) provider(s)")
@@ -130,12 +140,28 @@ struct ProvidersTab: View {
     }
     private func startEdit(_ p: Provider) { sheet = .edit(p, isNew: false) }
 
+    // The selected row's provider, or nil if nothing is selected or the
+    // selected id no longer matches a configured provider. Single source of
+    // truth for both the toolbar's enabled state and its actions, so the two
+    // can't disagree.
+    private var selectedProvider: Provider? {
+        guard let id = selection else { return nil }
+        return providers.provider(id: id)
+    }
+
+    // The provider a context-menu / double-click selection refers to. The list
+    // is single-selection, so the set holds at most one id.
+    private func provider(in ids: Set<UUID>) -> Provider? {
+        guard let id = ids.first else { return nil }
+        return providers.provider(id: id)
+    }
+
     private func editSelected() {
-        guard let id = selection, let p = providers.provider(id: id) else { return }
+        guard let p = selectedProvider else { return }
         startEdit(p)
     }
     private func removeSelected() {
-        guard let id = selection, let p = providers.provider(id: id) else { return }
+        guard let p = selectedProvider else { return }
         sheet = .remove(p)
     }
 }
