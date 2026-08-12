@@ -237,4 +237,18 @@ own diagnostic modes:
 .../Contents/MacOS/GitSync --legacy-keychain-cleanup-test  # one-time legacy-token cleanup (no repeat prompts)
 ```
 
+Each of these guards one specific way a big run has wedged. They exist because
+the symptom is always the same — repo rows frozen on "starting", no progress,
+no error — while the cause has been different every time:
+
+```
+.../Contents/MacOS/GitSync --parallelism-test           # fan-out really overlaps (not serialized on the actor)
+.../Contents/MacOS/GitSync --abort-contention-test      # abort polling stays lock-free under 128 workers
+.../Contents/MacOS/GitSync --stream-eof-test            # reader ends on git exiting, not on pipe EOF
+.../Contents/MacOS/GitSync --fd-leak-test               # pipe FDs closed per subprocess
+.../Contents/MacOS/GitSync --reachability-gate-test     # both sync paths refuse a down host instead of stalling
+.../Contents/MacOS/GitSync --stall-timeout-test         # connect stall vs slow transfer are separate deadlines
+.../Contents/MacOS/GitSync --pool-leak-test             # worker threads retire; pools don't accumulate to the 6144 ceiling
+```
+
 </details>

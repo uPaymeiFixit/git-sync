@@ -523,6 +523,13 @@ actor SyncEngine {
     // OFF the actor via the nonisolated syncOne. The TaskGroup tasks no longer
     // hop back onto the actor for the git work, so they genuinely overlap.
     private func fanOut(_ jobs: [FanJob], mux: SSHMultiplexer) async {
+        // No work: return before building a pool. A run that fails its
+        // reachability gate or its discovery reaches here with an empty list,
+        // and standing up 128 OS threads to immediately tear them down again is
+        // pure waste. It is also what set the pace of the thread leak this
+        // guards against: on a down VPN the scheduler retried every few minutes
+        // and each 0-repo run still paid for a full-width pool.
+        guard !jobs.isEmpty else { return }
         let cap = max(1, parallel)
         let cfg = workConfig()
         let sink = self.sink

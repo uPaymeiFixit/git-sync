@@ -84,10 +84,25 @@ enum StreamEofTest {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("gitsync-lsremote-\(getpid())")
         defer { try? fm.removeItem(at: tmp) }
+        // Fixture git must not inherit the developer's global config. With
+        // `commit.gpgsign = true` set globally (common once you sign commits),
+        // the seed commit below fails, the "populated" bare repo ends up with no
+        // refs, and this test then reports the empty-remote probe as broken when
+        // nothing is wrong with it. Pin identity + signing per invocation, the
+        // same way ParallelismTest does.
         func git(_ args: [String]) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             p.arguments = args
+            var e = ProcessInfo.processInfo.environment
+            let ov = [("commit.gpgsign", "false"), ("tag.gpgsign", "false"),
+                      ("user.email", "fixture@example.invalid"), ("user.name", "GitSync Fixture")]
+            for (i, kv) in ov.enumerated() {
+                e["GIT_CONFIG_KEY_\(i)"] = kv.0
+                e["GIT_CONFIG_VALUE_\(i)"] = kv.1
+            }
+            e["GIT_CONFIG_COUNT"] = String(ov.count)
+            p.environment = e
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
             try? p.run(); p.waitUntilExit()
