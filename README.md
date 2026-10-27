@@ -9,7 +9,7 @@ Idempotent, schedule-aware, and safe: it never overwrites your local work.
 
 https://github.com/user-attachments/assets/91607ff1-dcba-4486-8a60-aca13b1c0fcd
 
-<img src="https://github.com/user-attachments/assets/57b0a080-afea-4b86-8859-bb817a67aea8" width="820" alt="The Repositories window showing a filterable inventory of repos grouped by sync status, with a live sync-progress panel at the top">
+<img src="docs/screenshots/repositories.png" width="820" alt="The Repositories window showing a filterable inventory of repos grouped by sync status, with a live sync-progress panel at the top">
 
 </div>
 
@@ -53,17 +53,17 @@ branches are reported, not touched.
 
 | The menu bar |
 | --- |
-| <img src="https://github.com/user-attachments/assets/8da6f9dc-6d71-4c2a-b237-73ac71af15d2" width="280" alt="The GitSync menu-bar dropdown"> |
+| <img src="docs/screenshots/menu-bar.png" width="280" alt="The GitSync menu-bar dropdown"> |
 | Run on demand, jump to the inventory, open the activity log, or open Settings — all from the menu bar. The icon spins while syncing and flags anomalies when a run finishes. |
 
 | Providers |
 | --- |
-| <img src="https://github.com/user-attachments/assets/7564eb79-a07d-4364-a502-05fcd9eb6d54" width="620" alt="Settings → Providers, listing configured sync sources"> |
+| <img src="docs/screenshots/providers.png" width="620" alt="Settings → Providers, listing configured sync sources"> |
 | Add a provider per source. Each has its own host/scope, token, disk folder, skip patterns, and sync scope. |
 
 | Editing a provider |
 | --- |
-| <img src="https://github.com/user-attachments/assets/f6160ed6-4e54-4549-99c8-cbb2113d92a1" width="520" alt="The provider editor sheet"> |
+| <img src="docs/screenshots/provider-editor.png" width="520" alt="The provider editor sheet"> |
 | Host, scope, token, and the folder its repos clone into — validated against your other providers so two can't collide on disk. |
 
 ## Install
