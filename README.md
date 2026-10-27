@@ -7,9 +7,7 @@ to your Mac, and keep them current. From the menu bar.**
 
 Idempotent, schedule-aware, and safe: it never overwrites your local work.
 
-<a href="docs/launch-video.mp4"><img src="docs/launch-video.jpg" width="820" alt="GitSync launch video (36 seconds) — click to play"></a>
-
-<sub>▶ Watch the 36-second tour</sub>
+https://github.com/user-attachments/assets/91607ff1-dcba-4486-8a60-aca13b1c0fcd
 
 <img src="https://github.com/user-attachments/assets/57b0a080-afea-4b86-8859-bb817a67aea8" width="820" alt="The Repositories window showing a filterable inventory of repos grouped by sync status, with a live sync-progress panel at the top">
 

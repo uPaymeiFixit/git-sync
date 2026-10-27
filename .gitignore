@@ -12,5 +12,5 @@ GitSync-v*.zip
 # Local-only env file (kept as a guard; not used by the app)
 .envrc
 
-# Launch-video render output (frames, stems, scratch). The shipped copy lives in docs/.
+# Launch-video render output (frames, stems, scratch). The README plays the uploaded copy.
 brag-output/
